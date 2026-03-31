@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Annotated, Dict, List, Optional
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -88,11 +88,14 @@ class Settings(BaseSettings):
         alias="KALSHI_API_BASE_URL",
     )
 
-    enabled_cities: List[str] = Field(
+    enabled_cities: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: ["nyc", "chicago", "los_angeles", "denver"],
         alias="ENABLED_CITIES",
     )
-    blacklisted_cities: List[str] = Field(default_factory=lambda: ["miami"], alias="BLACKLISTED_CITIES")
+    blacklisted_cities: Annotated[List[str], NoDecode] = Field(
+        default_factory=lambda: ["miami"],
+        alias="BLACKLISTED_CITIES",
+    )
     no_only: bool = Field(default=False, alias="NO_ONLY")
     skip_same_day: bool = Field(default=True, alias="SKIP_SAME_DAY")
     day_ahead_only: bool = Field(default=True, alias="DAY_AHEAD_ONLY")
