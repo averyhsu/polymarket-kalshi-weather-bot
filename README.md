@@ -2,7 +2,13 @@
 
 Kalshi temperature-market trading bot built around a Gumbel bucket-probability engine, uncertainty-aware entry filters, fee-aware Kelly sizing, SQLite-backed paper trading, and a guarded live execution path for Kalshi `KXHIGH` contracts.
 
-Paper mode works from public Kalshi market data plus free weather sources. Live mode requires explicit Kalshi API credentials and stays behind config flags and `--mode live`.
+Both `paper` and `live` read the same live public Kalshi market data and live weather APIs. The difference is execution:
+
+- `paper` = live inputs + simulated local execution in SQLite
+- `live` = live inputs + real Kalshi order submission
+- `--dry-run` = run the logic without executing the trade
+
+Each CLI invocation runs one cycle. This repo does not run continuously unless you schedule repeated runs yourself.
 
 ## Project Overview
 
@@ -103,6 +109,25 @@ Important values:
 
 Live execution requires both Kalshi credential variables. Paper mode does not.
 
+## Modes
+
+The bot has two execution modes and one safety flag:
+
+- `python main.py --mode paper`
+  Uses live Kalshi quotes and live weather data, then simulates entries, exits, settlements, cash, and positions locally.
+- `python main.py --mode paper --dry-run`
+  Uses the same live inputs, but does not create or close paper trades.
+- `python main.py --mode live`
+  Uses the same live inputs, then submits real orders to Kalshi if a trade is approved and credentials are configured.
+- `python main.py --mode live --dry-run`
+  Uses the live decision path, but does not submit the order.
+
+This means the current repo is:
+
+- not a separate market-data sandbox
+- not a Kalshi demo-account mode yet
+- not a continuous loop by default
+
 ## Paper Trading Quickstart
 
 Run one paper cycle with a $100 starting balance:
@@ -121,11 +146,14 @@ python main.py --replay
 python main.py --close-all-paper
 ```
 
+Paper mode is the main strategy-testing mode because it keeps a full local ledger of paper cash, fills, positions, exits, and P&L.
+
 ## Live Trading Warnings
 
 Live mode is intentionally conservative:
 
 - It only submits orders when `--mode live` is used.
+- It reads the same live public Kalshi quotes as paper mode; the difference is that execution is real.
 - It refuses to place live orders without `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH`.
 - `--dry-run` works in live mode, so you can validate the scan/decision path without sending orders.
 - The current live path submits entry orders only and records them locally; you should test with very small size first.
