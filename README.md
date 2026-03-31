@@ -72,15 +72,34 @@ kalshi-weather-bot/
 
 ## Installation
 
+The command `python -m venv .venv` creates a virtual environment in a local folder named `.venv`. It does not activate it. Activation is different on Windows versus macOS/Linux.
+
 Windows PowerShell:
 
 ```powershell
-& "C:\Users\avery\AppData\Roaming\uv\python\cpython-3.9-windows-x86_64-none\python.exe" -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Generic Python:
+If PowerShell blocks activation scripts, run this once for the current session and then activate again:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Windows Command Prompt:
+
+```cmd
+python -m venv .venv
+.\.venv\Scripts\activate.bat
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+macOS / Linux:
 
 ```bash
 python -m venv .venv
@@ -88,6 +107,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
+
+After activation, you can use `python` and `pip` normally inside that shell session.
 
 ## Environment Variables
 
