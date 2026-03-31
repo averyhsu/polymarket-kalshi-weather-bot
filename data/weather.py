@@ -1,0 +1,316 @@
+"""Weather forecast and observation adapters."""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, timedelta
+from math import isfinite
+from pathlib import Path
+from statistics import mean, pstdev
+from typing import Dict, List, Optional
+
+import httpx
+
+from config import Settings
+
+
+logger = logging.getLogger(__name__)
+
+ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+NWS_OBSERVATION_URL = "https://api.weather.gov/stations/{station}/observations"
+EXPECTED_ENSEMBLE_MEMBERS = 31
+
+
+CITY_CONFIG: Dict[str, Dict[str, object]] = {
+    "nyc": {
+        "name": "New York City",
+        "kalshi_series": "KXHIGHNY",
+        "lat": 40.7128,
+        "lon": -74.0060,
+        "nws_station": "KNYC",
+    },
+    "chicago": {
+        "name": "Chicago",
+        "kalshi_series": "KXHIGHCHI",
+        "lat": 41.8781,
+        "lon": -87.6298,
+        "nws_station": "KORD",
+    },
+    "miami": {
+        "name": "Miami",
+        "kalshi_series": "KXHIGHMIA",
+        "lat": 25.7617,
+        "lon": -80.1918,
+        "nws_station": "KMIA",
+    },
+    "los_angeles": {
+        "name": "Los Angeles",
+        "kalshi_series": "KXHIGHLAX",
+        "lat": 34.0522,
+        "lon": -118.2437,
+        "nws_station": "KLAX",
+    },
+    "denver": {
+        "name": "Denver",
+        "kalshi_series": "KXHIGHDEN",
+        "lat": 39.7392,
+        "lon": -104.9903,
+        "nws_station": "KDEN",
+    },
+}
+
+
+@dataclass(frozen=True)
+class SourceHealth:
+    """Source-health score used by risk and sizing layers."""
+
+    score: float
+    status: str
+    success: float
+    freshness: float
+    completeness: float
+    consistency: float
+
+
+@dataclass(frozen=True)
+class ForecastSnapshot:
+    """Normalized ensemble forecast for a single city/date."""
+
+    city_key: str
+    city_name: str
+    target_date: date
+    fetched_at: datetime
+    provider: str
+    member_highs: List[float]
+    mean_temp_f: float
+    sigma_temp_f: float
+    member_spread_f: float
+    disagreement: float
+    source_health: SourceHealth
+
+    @property
+    def member_count(self) -> int:
+        return len(self.member_highs)
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(upper, value))
+
+
+def _cache_file(settings: Settings, city_key: str, target_date: date) -> Path:
+    return settings.cache_dir / "weather" / f"{city_key}_{target_date.isoformat()}.json"
+
+
+def _serialize_snapshot(snapshot: ForecastSnapshot) -> Dict[str, object]:
+    payload = asdict(snapshot)
+    payload["target_date"] = snapshot.target_date.isoformat()
+    payload["fetched_at"] = snapshot.fetched_at.isoformat()
+    return payload
+
+
+def _deserialize_snapshot(payload: Dict[str, object]) -> ForecastSnapshot:
+    source_payload = dict(payload["source_health"])
+    source_health = SourceHealth(**source_payload)
+    return ForecastSnapshot(
+        city_key=str(payload["city_key"]),
+        city_name=str(payload["city_name"]),
+        target_date=date.fromisoformat(str(payload["target_date"])),
+        fetched_at=datetime.fromisoformat(str(payload["fetched_at"])),
+        provider=str(payload["provider"]),
+        member_highs=[float(value) for value in payload["member_highs"]],
+        mean_temp_f=float(payload["mean_temp_f"]),
+        sigma_temp_f=float(payload["sigma_temp_f"]),
+        member_spread_f=float(payload["member_spread_f"]),
+        disagreement=float(payload["disagreement"]),
+        source_health=source_health,
+    )
+
+
+def _load_cached_snapshot(settings: Settings, city_key: str, target_date: date) -> Optional[ForecastSnapshot]:
+    cache_path = _cache_file(settings, city_key, target_date)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        return _deserialize_snapshot(payload)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _persist_snapshot(settings: Settings, snapshot: ForecastSnapshot) -> None:
+    cache_path = _cache_file(settings, snapshot.city_key, snapshot.target_date)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(_serialize_snapshot(snapshot), indent=2), encoding="utf-8")
+
+
+def _extract_member_highs(payload: Dict[str, object]) -> List[float]:
+    daily = payload.get("daily", {})
+    if not isinstance(daily, dict):
+        return []
+    values: List[float] = []
+    for key, item in daily.items():
+        if "temperature_2m_max" not in str(key):
+            continue
+        if not isinstance(item, list) or not item:
+            continue
+        raw = item[0]
+        if raw is None:
+            continue
+        try:
+            temp = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(temp):
+            values.append(temp)
+    return values
+
+
+def _compute_disagreement(member_highs: List[float]) -> float:
+    if len(member_highs) < 2:
+        return 1.0
+    center = mean(member_highs)
+    above = sum(1 for value in member_highs if value >= center)
+    fraction = above / len(member_highs)
+    return _clamp(4.0 * fraction * (1.0 - fraction))
+
+
+def _compute_source_health(
+    *,
+    fetched_at: datetime,
+    member_count: int,
+    sigma_temp_f: float,
+    member_spread_f: float,
+    settings: Settings,
+) -> SourceHealth:
+    age_minutes = max(0.0, (datetime.utcnow() - fetched_at).total_seconds() / 60.0)
+    success = 1.0 if member_count > 0 else 0.0
+    freshness = _clamp(1.0 - age_minutes / max(settings.forecast_cache_ttl_minutes * 2, 1))
+    completeness = _clamp(member_count / EXPECTED_ENSEMBLE_MEMBERS)
+    spread_scale = max(6.0, sigma_temp_f * 4.0)
+    consistency = 1.0 - _clamp(member_spread_f / spread_scale)
+    score = _clamp(0.45 * success + 0.25 * freshness + 0.20 * completeness + 0.10 * consistency)
+    if score >= settings.source_health_degraded_threshold:
+        status = "HEALTHY"
+    elif score >= settings.source_health_trade_threshold:
+        status = "DEGRADED"
+    else:
+        status = "BROKEN"
+    return SourceHealth(
+        score=score,
+        status=status,
+        success=success,
+        freshness=freshness,
+        completeness=completeness,
+        consistency=consistency,
+    )
+
+
+def fetch_forecast_snapshot(settings: Settings, city_key: str, target_date: date) -> Optional[ForecastSnapshot]:
+    """Fetch and normalize an ensemble forecast snapshot."""
+
+    city = CITY_CONFIG.get(city_key)
+    if city is None:
+        raise ValueError(f"Unsupported city '{city_key}'")
+
+    cached = _load_cached_snapshot(settings, city_key, target_date)
+    if cached is not None:
+        age = datetime.utcnow() - cached.fetched_at
+        if age <= timedelta(minutes=settings.forecast_cache_ttl_minutes):
+            return cached
+
+    params = {
+        "latitude": city["lat"],
+        "longitude": city["lon"],
+        "daily": "temperature_2m_max",
+        "temperature_unit": "fahrenheit",
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+        "models": "gfs_seamless",
+    }
+    headers = {"User-Agent": settings.user_agent}
+
+    try:
+        with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
+            response = client.get(ENSEMBLE_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        logger.warning("Open-Meteo request failed for %s %s: %s", city_key, target_date, exc)
+        if cached is not None:
+            return cached
+        return None
+
+    member_highs = _extract_member_highs(payload)
+    if not member_highs:
+        logger.warning("No ensemble members returned for %s %s", city_key, target_date)
+        return cached
+
+    mean_temp_f = mean(member_highs)
+    sigma_temp_f = pstdev(member_highs) if len(member_highs) > 1 else 0.0
+    member_spread_f = max(member_highs) - min(member_highs)
+    disagreement = _compute_disagreement(member_highs)
+    fetched_at = datetime.utcnow()
+    source_health = _compute_source_health(
+        fetched_at=fetched_at,
+        member_count=len(member_highs),
+        sigma_temp_f=sigma_temp_f,
+        member_spread_f=member_spread_f,
+        settings=settings,
+    )
+    snapshot = ForecastSnapshot(
+        city_key=city_key,
+        city_name=str(city["name"]),
+        target_date=target_date,
+        fetched_at=fetched_at,
+        provider="open-meteo-gfs-ensemble",
+        member_highs=member_highs,
+        mean_temp_f=mean_temp_f,
+        sigma_temp_f=sigma_temp_f,
+        member_spread_f=member_spread_f,
+        disagreement=disagreement,
+        source_health=source_health,
+    )
+    _persist_snapshot(settings, snapshot)
+    return snapshot
+
+
+def fetch_observed_high(settings: Settings, city_key: str, target_date: date) -> Optional[float]:
+    """Fetch NWS observations for settlement verification."""
+
+    city = CITY_CONFIG.get(city_key)
+    if city is None:
+        raise ValueError(f"Unsupported city '{city_key}'")
+
+    station = str(city["nws_station"])
+    url = NWS_OBSERVATION_URL.format(station=station)
+    start = datetime.combine(target_date, datetime.min.time()).isoformat() + "Z"
+    end = datetime.combine(target_date + timedelta(days=1), datetime.min.time()).isoformat() + "Z"
+    headers = {"User-Agent": settings.user_agent, "Accept": "application/geo+json"}
+    try:
+        with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
+            response = client.get(url, params={"start": start, "end": end})
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        logger.warning("NWS observation request failed for %s %s: %s", city_key, target_date, exc)
+        return None
+
+    features = payload.get("features", [])
+    observations: List[float] = []
+    for feature in features:
+        properties = feature.get("properties", {})
+        temperature = properties.get("temperature", {})
+        raw_value = temperature.get("value")
+        if raw_value is None:
+            continue
+        try:
+            celsius = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        observations.append(celsius * 9.0 / 5.0 + 32.0)
+
+    if not observations:
+        return None
+    return max(observations)

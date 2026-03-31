@@ -1,58 +1,42 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
+*.pyo
 .Python
-venv/
-ENV/
-env/
 .venv/
-*.egg-info/
-dist/
-build/
-*.egg
+venv/
+env/
 
-# Database
+# Local state
+.cache/
 *.db
+*.sqlite
 *.sqlite3
+*.sqlite3-*
+*.log
 
-# Environment
+# Environment files
 .env
 .env.local
 .env.*.local
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Node
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Build
-frontend/dist/
-frontend/build/
-
-# Logs
-*.log
-logs/
-
-# Cache
-.cache/
-*.cache
-
-# Test
+# Packaging / tooling
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
-.pytest_cache/
-*.pem
+
+# Node leftovers from the original repo
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

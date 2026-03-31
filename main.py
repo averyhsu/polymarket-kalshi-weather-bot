@@ -1,0 +1,104 @@
+"""CLI entrypoint for the Kalshi weather bot."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from typing import Any, Dict
+
+from config import load_settings
+from orchestrator import WeatherTradingOrchestrator
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create the CLI parser."""
+
+    parser = argparse.ArgumentParser(description="Kalshi weather trading bot")
+    parser.add_argument("--mode", choices=["paper", "live"], help="Execution mode")
+    parser.add_argument("--profile", choices=["conservative", "balanced", "aggressive"], help="Risk profile")
+    parser.add_argument("--balance", type=float, help="Initial paper balance override")
+    parser.add_argument("--dry-run", action="store_true", help="Evaluate decisions without placing orders")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--stats", action="store_true", help="Print P&L and calibration stats")
+    parser.add_argument("--replay", action="store_true", help="Replay decisions from stored snapshots")
+    parser.add_argument("--positions", action="store_true", help="Show open positions")
+    parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
+    return parser
+
+
+def configure_logging(verbose: bool) -> None:
+    """Configure logging output."""
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def _print_json(payload: Dict[str, Any]) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def main() -> int:
+    """Run the CLI."""
+
+    parser = build_parser()
+    args = parser.parse_args()
+    configure_logging(bool(args.verbose))
+
+    overrides = {
+        "mode": args.mode,
+        "profile": args.profile,
+        "initial_balance": args.balance,
+        "dry_run": args.dry_run or None,
+        "verbose": args.verbose or None,
+    }
+    settings = load_settings(overrides)
+    orchestrator = WeatherTradingOrchestrator(settings)
+
+    if args.stats:
+        _print_json(orchestrator.stats())
+        return 0
+    if args.replay:
+        _print_json(orchestrator.replay())
+        return 0
+    if args.positions:
+        positions = [
+            {
+                "ticker": position.ticker,
+                "city": position.city_key,
+                "side": position.side,
+                "contracts": position.contracts,
+                "avg_price": position.avg_price,
+                "current_mark": position.current_mark,
+                "unrealized_pnl": position.unrealized_pnl,
+            }
+            for position in orchestrator.positions()
+        ]
+        _print_json({"positions": positions})
+        return 0
+    if args.close_all_paper:
+        closed = orchestrator.close_all_paper()
+        _print_json({"closed_positions": closed})
+        return 0
+
+    summary = orchestrator.run_cycle()
+    _print_json(
+        {
+            "mode": settings.mode,
+            "profile": settings.profile,
+            "scanned_markets": summary.scanned_markets,
+            "forecasts_loaded": summary.forecasts_loaded,
+            "entries_attempted": summary.entries_attempted,
+            "entries_executed": summary.entries_executed,
+            "exits_executed": summary.exits_executed,
+            "settlements": summary.settlements,
+            "skipped": summary.skipped[:20],
+        }
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
