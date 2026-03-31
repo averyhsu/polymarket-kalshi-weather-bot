@@ -72,7 +72,7 @@ kalshi-weather-bot/
 
 ## Installation
 
-The command `python -m venv .venv` creates a virtual environment in a local folder named `.venv`. It does not activate it. Activation is different on Windows versus macOS/Linux.
+The command `python -m venv .venv` creates a virtual environment in a local folder named `.venv`. It does not activate it. You usually only need to create `.venv` once per project clone, then activate the same environment in future shell sessions. Activation is different on Windows versus macOS/Linux.
 
 Windows PowerShell:
 
