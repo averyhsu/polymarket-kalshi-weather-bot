@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
 from statistics import mean, pstdev
@@ -19,8 +19,10 @@ from config import Settings
 logger = logging.getLogger(__name__)
 
 ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 NWS_OBSERVATION_URL = "https://api.weather.gov/stations/{station}/observations"
 EXPECTED_ENSEMBLE_MEMBERS = 31
+EXPECTED_HISTORICAL_RUNS = 4
 
 
 CITY_CONFIG: Dict[str, Dict[str, object]] = {
@@ -183,11 +185,14 @@ def _compute_source_health(
     sigma_temp_f: float,
     member_spread_f: float,
     settings: Settings,
+    expected_member_count: int = EXPECTED_ENSEMBLE_MEMBERS,
+    reference_time: Optional[datetime] = None,
 ) -> SourceHealth:
-    age_minutes = max(0.0, (datetime.utcnow() - fetched_at).total_seconds() / 60.0)
+    reference = reference_time or datetime.utcnow()
+    age_minutes = max(0.0, (reference - fetched_at).total_seconds() / 60.0)
     success = 1.0 if member_count > 0 else 0.0
     freshness = _clamp(1.0 - age_minutes / max(settings.forecast_cache_ttl_minutes * 2, 1))
-    completeness = _clamp(member_count / EXPECTED_ENSEMBLE_MEMBERS)
+    completeness = _clamp(member_count / max(expected_member_count, 1))
     spread_scale = max(6.0, sigma_temp_f * 4.0)
     consistency = 1.0 - _clamp(member_spread_f / spread_scale)
     score = _clamp(0.45 * success + 0.25 * freshness + 0.20 * completeness + 0.10 * consistency)
@@ -204,6 +209,45 @@ def _compute_source_health(
         freshness=freshness,
         completeness=completeness,
         consistency=consistency,
+    )
+
+
+def _build_snapshot(
+    *,
+    city_key: str,
+    target_date: date,
+    provider: str,
+    member_highs: List[float],
+    fetched_at: datetime,
+    settings: Settings,
+    expected_member_count: int,
+    reference_time: Optional[datetime] = None,
+) -> ForecastSnapshot:
+    mean_temp_f = mean(member_highs)
+    sigma_temp_f = pstdev(member_highs) if len(member_highs) > 1 else 0.0
+    member_spread_f = max(member_highs) - min(member_highs) if member_highs else 0.0
+    disagreement = _compute_disagreement(member_highs)
+    source_health = _compute_source_health(
+        fetched_at=fetched_at,
+        member_count=len(member_highs),
+        sigma_temp_f=sigma_temp_f,
+        member_spread_f=member_spread_f,
+        settings=settings,
+        expected_member_count=expected_member_count,
+        reference_time=reference_time,
+    )
+    return ForecastSnapshot(
+        city_key=city_key,
+        city_name=str(CITY_CONFIG[city_key]["name"]),
+        target_date=target_date,
+        fetched_at=fetched_at,
+        provider=provider,
+        member_highs=member_highs,
+        mean_temp_f=mean_temp_f,
+        sigma_temp_f=sigma_temp_f,
+        member_spread_f=member_spread_f,
+        disagreement=disagreement,
+        source_health=source_health,
     )
 
 
@@ -247,33 +291,116 @@ def fetch_forecast_snapshot(settings: Settings, city_key: str, target_date: date
         logger.warning("No ensemble members returned for %s %s", city_key, target_date)
         return cached
 
-    mean_temp_f = mean(member_highs)
-    sigma_temp_f = pstdev(member_highs) if len(member_highs) > 1 else 0.0
-    member_spread_f = max(member_highs) - min(member_highs)
-    disagreement = _compute_disagreement(member_highs)
     fetched_at = datetime.utcnow()
-    source_health = _compute_source_health(
-        fetched_at=fetched_at,
-        member_count=len(member_highs),
-        sigma_temp_f=sigma_temp_f,
-        member_spread_f=member_spread_f,
-        settings=settings,
-    )
-    snapshot = ForecastSnapshot(
+    snapshot = _build_snapshot(
         city_key=city_key,
-        city_name=str(city["name"]),
         target_date=target_date,
-        fetched_at=fetched_at,
         provider="open-meteo-gfs-ensemble",
         member_highs=member_highs,
-        mean_temp_f=mean_temp_f,
-        sigma_temp_f=sigma_temp_f,
-        member_spread_f=member_spread_f,
-        disagreement=disagreement,
-        source_health=source_health,
+        fetched_at=fetched_at,
+        settings=settings,
+        expected_member_count=EXPECTED_ENSEMBLE_MEMBERS,
     )
     _persist_snapshot(settings, snapshot)
     return snapshot
+
+
+def _fetch_single_run_high(
+    settings: Settings,
+    city_key: str,
+    target_date: date,
+    run_time: datetime,
+) -> Optional[float]:
+    city = CITY_CONFIG.get(city_key)
+    if city is None:
+        raise ValueError(f"Unsupported city '{city_key}'")
+
+    params = {
+        "latitude": city["lat"],
+        "longitude": city["lon"],
+        "daily": "temperature_2m_max",
+        "temperature_unit": "fahrenheit",
+        "models": "gfs_seamless",
+        "run": run_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M"),
+        "forecast_days": max((target_date - run_time.date()).days + 1, 1),
+        "timezone": "UTC",
+    }
+    headers = {"User-Agent": settings.user_agent}
+    try:
+        with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
+            response = client.get(SINGLE_RUNS_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as exc:
+        logger.warning("Open-Meteo single-run request failed for %s %s @ %s: %s", city_key, target_date, run_time, exc)
+        return None
+
+    daily = payload.get("daily", {})
+    if not isinstance(daily, dict):
+        return None
+    times = daily.get("time", [])
+    values = daily.get("temperature_2m_max", [])
+    if not isinstance(times, list) or not isinstance(values, list):
+        return None
+    target_iso = target_date.isoformat()
+    for raw_day, raw_value in zip(times, values):
+        if str(raw_day) != target_iso or raw_value is None:
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        return value if isfinite(value) else None
+    return None
+
+
+def fetch_historical_forecast_snapshot(
+    settings: Settings,
+    city_key: str,
+    target_date: date,
+    *,
+    entry_time_utc: datetime,
+    run_hours_utc: Optional[List[int]] = None,
+) -> Optional[ForecastSnapshot]:
+    """Approximate a historical day-ahead forecast using archived deterministic runs.
+
+    Open-Meteo does not expose archived historical ensemble members in the same shape as the
+    live ensemble endpoint used by the trading cycle. For backtests we approximate uncertainty
+    by sampling the deterministic GFS run at multiple issuance times on the entry day and using
+    those run-to-run forecasts as pseudo-members.
+    """
+
+    if entry_time_utc.tzinfo is None:
+        entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+    else:
+        entry_time_utc = entry_time_utc.astimezone(timezone.utc)
+
+    candidate_hours = run_hours_utc or [0, 6, 12, 18]
+    member_highs: List[float] = []
+    latest_run = entry_time_utc
+    for hour in candidate_hours:
+        run_time = datetime.combine(entry_time_utc.date(), datetime.min.time(), tzinfo=timezone.utc).replace(hour=hour)
+        if run_time > entry_time_utc:
+            continue
+        value = _fetch_single_run_high(settings, city_key, target_date, run_time)
+        if value is None:
+            continue
+        member_highs.append(value)
+        latest_run = max(latest_run, run_time)
+
+    if not member_highs:
+        return None
+
+    return _build_snapshot(
+        city_key=city_key,
+        target_date=target_date,
+        provider="open-meteo-gfs-single-runs",
+        member_highs=member_highs,
+        fetched_at=latest_run,
+        settings=settings,
+        expected_member_count=EXPECTED_HISTORICAL_RUNS,
+        reference_time=entry_time_utc,
+    )
 
 
 def fetch_observed_high(settings: Settings, city_key: str, target_date: date) -> Optional[float]:

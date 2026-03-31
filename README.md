@@ -79,7 +79,7 @@ Windows PowerShell:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
@@ -95,7 +95,7 @@ Windows Command Prompt:
 ```cmd
 python -m venv .venv
 .\.venv\Scripts\activate.bat
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 copy .env.example .env
 ```
 
@@ -104,7 +104,7 @@ macOS / Linux:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -164,10 +164,36 @@ python main.py --mode paper --balance 100 --dry-run
 python main.py --stats
 python main.py --positions
 python main.py --replay
+python main.py --backtest --backtest-days 14
 python main.py --close-all-paper
 ```
 
 Paper mode is the main strategy-testing mode because it keeps a full local ledger of paper cash, fills, positions, exits, and P&L.
+
+## Historical Backtesting
+
+Run a historical day-ahead backtest over settled markets:
+
+```bash
+python main.py --backtest --backtest-days 14
+python main.py --backtest --backtest-start 2026-03-01 --backtest-end 2026-03-31
+python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
+```
+
+What the backtest does:
+
+- loads settled historical `KXHIGH` contracts for the requested target-date range
+- reconstructs day-ahead entry quotes from Kalshi historical hourly candlesticks
+- reconstructs historical forecasts from archived Open-Meteo single runs on the entry day
+- runs the same probability, risk, decision, and Kelly sizing logic as live and paper mode
+- enters once per cycle and holds positions to settlement
+- reports P&L, drawdown, win rate, Brier score, skip reasons, and trade-level details
+
+What it does not do yet:
+
+- it does not simulate intraday exits from historical quote paths
+- it does not replay true archived ensemble members; uncertainty is approximated from multiple archived deterministic runs on the entry day
+- it does not model queue position or partial fills
 
 ## Live Trading Warnings
 
@@ -269,6 +295,7 @@ Available analytics:
 
 - `python main.py --stats`
 - `python main.py --replay`
+- `python main.py --backtest --backtest-days 14`
 
 ## Tests
 
@@ -284,7 +311,8 @@ python -m unittest discover -s tests -v
 - The probability engine uses the required Gumbel framework and simple empirical diagnostics, but not a full multi-model weather blend.
 - Fees are modeled conservatively as fixed per-contract approximations.
 - Live execution is intentionally narrow and should be treated as a guarded MVP.
-- The replay harness reuses stored snapshots and forecasts, but it is not a full historical event simulator yet.
+- The historical backtest currently holds positions to settlement instead of simulating intraday exit timing.
+- Historical forecast uncertainty is reconstructed from archived deterministic runs, not archived ensemble-member fields.
 
 ## Settlement Caveats
 
@@ -299,7 +327,7 @@ Important practical caveats:
 ## Future Improvements
 
 - Replace seeded climatology with station-specific historical normals.
-- Add richer replay and backtesting over archived snapshots.
+- Add intraday historical exit simulation and richer archived replay.
 - Add live exit-order management and reconciliation.
 - Add portfolio-level city-correlation controls.
 - Add richer calibration and settlement-quality reports.

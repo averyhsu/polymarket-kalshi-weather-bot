@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from datetime import date, timedelta
 from typing import Any, Dict
 
 from config import load_settings
@@ -22,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--stats", action="store_true", help="Print P&L and calibration stats")
     parser.add_argument("--replay", action="store_true", help="Replay decisions from stored snapshots")
+    parser.add_argument("--backtest", action="store_true", help="Run a historical day-ahead backtest")
+    parser.add_argument("--backtest-start", type=str, help="Inclusive target-date start for backtests (YYYY-MM-DD)")
+    parser.add_argument("--backtest-end", type=str, help="Inclusive target-date end for backtests (YYYY-MM-DD)")
+    parser.add_argument("--backtest-days", type=int, help="Shortcut for a recent backtest window ending yesterday")
+    parser.add_argument("--backtest-entry-hour-utc", type=int, default=20, help="Entry hour in UTC for backtests")
+    parser.add_argument("--backtest-entry-minute-utc", type=int, default=0, help="Entry minute in UTC for backtests")
     parser.add_argument("--positions", action="store_true", help="Show open positions")
     parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
     return parser
@@ -34,10 +41,17 @@ def configure_logging(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if not verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _print_json(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def _parse_iso_date(raw_value: str) -> date:
+    return date.fromisoformat(raw_value)
 
 
 def main() -> int:
@@ -62,6 +76,24 @@ def main() -> int:
         return 0
     if args.replay:
         _print_json(orchestrator.replay())
+        return 0
+    if args.backtest:
+        if args.backtest_days:
+            end_date = date.today() - timedelta(days=1)
+            start_date = end_date - timedelta(days=max(args.backtest_days - 1, 0))
+        else:
+            if not args.backtest_start or not args.backtest_end:
+                parser.error("--backtest requires either --backtest-days or both --backtest-start and --backtest-end")
+            start_date = _parse_iso_date(args.backtest_start)
+            end_date = _parse_iso_date(args.backtest_end)
+        _print_json(
+            orchestrator.backtest(
+                start_date=start_date,
+                end_date=end_date,
+                entry_hour_utc=args.backtest_entry_hour_utc,
+                entry_minute_utc=args.backtest_entry_minute_utc,
+            )
+        )
         return 0
     if args.positions:
         positions = [

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from analytics.calibration import summarize_calibration
 from analytics.pnl import summarize_pnl
-from analytics.replay import replay_from_database
+from analytics.replay import replay_from_database, run_historical_backtest
 from config import Settings
 from core.decision import choose_trade
 from core.exits import evaluate_exit
@@ -295,6 +295,24 @@ class WeatherTradingOrchestrator:
         """Replay the strategy using stored forecasts and snapshots."""
 
         return replay_from_database(self.settings, self.database)
+
+    def backtest(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        entry_hour_utc: int = 20,
+        entry_minute_utc: int = 0,
+    ) -> Dict[str, object]:
+        """Run a historical day-ahead backtest."""
+
+        return run_historical_backtest(
+            self.settings,
+            start_date=start_date,
+            end_date=end_date,
+            entry_hour_utc=entry_hour_utc,
+            entry_minute_utc=entry_minute_utc,
+        )
 
     def positions(self) -> List[PositionRecord]:
         """Return open positions."""

@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -79,6 +79,30 @@ class MarketQuote:
         return sum(candidates) / len(candidates) if candidates else 0.5
 
 
+@dataclass(frozen=True)
+class HistoricalMarketDefinition:
+    """Historical market metadata used by the backtest engine."""
+
+    ticker: str
+    series_ticker: str
+    city_key: str
+    city_name: str
+    target_date: date
+    bucket_low: float
+    bucket_high: float
+    strike_label: str
+    title: str
+    subtitle: str
+    actual_high_f: float
+    status: str
+    open_time: Optional[datetime]
+    close_time: Optional[datetime]
+    settlement_time: Optional[datetime]
+    volume: float
+    open_interest: float
+    use_historical_api: bool = False
+
+
 class KalshiClient:
     """Synchronous Kalshi client with RSA-PSS request signing."""
 
@@ -133,11 +157,56 @@ class KalshiClient:
             response.raise_for_status()
             return response.json()
 
-    def list_markets(self, series_ticker: str, cursor: Optional[str] = None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"series_ticker": series_ticker, "status": "open", "limit": 200}
+    def list_markets(
+        self,
+        series_ticker: str,
+        cursor: Optional[str] = None,
+        *,
+        status: str = "open",
+        min_settled_ts: Optional[int] = None,
+        max_settled_ts: Optional[int] = None,
+        historical: bool = False,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"series_ticker": series_ticker, "status": status, "limit": 200}
         if cursor:
             params["cursor"] = cursor
-        return self.get("/markets", params=params)
+        if min_settled_ts is not None:
+            params["min_settled_ts"] = int(min_settled_ts)
+        if max_settled_ts is not None:
+            params["max_settled_ts"] = int(max_settled_ts)
+        path = "/historical/markets" if historical else "/markets"
+        return self.get(path, params=params)
+
+    def get_historical_cutoff(self) -> Optional[datetime]:
+        payload = self.get("/historical/cutoff")
+        raw = payload.get("historical_cutoff_ts")
+        if raw is None:
+            return None
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def get_market_candlesticks(
+        self,
+        *,
+        series_ticker: str,
+        ticker: str,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int = 60,
+        historical: bool = False,
+    ) -> Dict[str, Any]:
+        params = {
+            "start_ts": int(start_ts),
+            "end_ts": int(end_ts),
+            "period_interval": int(period_interval),
+        }
+        if historical:
+            path = f"/historical/markets/{ticker}/candlesticks"
+        else:
+            path = f"/series/{series_ticker}/markets/{ticker}/candlesticks"
+        return self.get(path, params=params)
 
     def create_order(
         self,
@@ -212,6 +281,18 @@ def _convert_dollars(raw_value: Any) -> float:
         return float(raw_value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_actual_high(raw_market: Dict[str, Any]) -> Optional[float]:
+    for key in ("expiration_value", "settlement_value", "settlement_value_dollars"):
+        raw_value = raw_market.get(key)
+        if raw_value in (None, ""):
+            continue
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _parse_bucket_from_label(label: str) -> Optional[Tuple[float, float, str]]:
@@ -341,3 +422,195 @@ def fetch_kxhigh_markets(settings: Settings) -> List[MarketQuote]:
             if not cursor or not raw_markets:
                 break
     return all_quotes
+
+
+def _normalize_historical_market(
+    raw_market: Dict[str, Any],
+    city_key: str,
+    *,
+    use_historical_api: bool,
+) -> Optional[HistoricalMarketDefinition]:
+    ticker = str(raw_market.get("ticker", "")).strip()
+    target_date = _parse_date_from_ticker(ticker)
+    if target_date is None:
+        return None
+
+    title = str(raw_market.get("title") or "")
+    subtitle = str(raw_market.get("subtitle") or raw_market.get("yes_sub_title") or "")
+    strike_label = subtitle or title
+    bucket = _parse_bucket_from_label(strike_label) or _fallback_bucket_from_ticker(ticker)
+    if bucket is None:
+        return None
+    bucket_low, bucket_high, normalized_label = bucket
+    actual_high = _parse_actual_high(raw_market)
+    if actual_high is None:
+        return None
+
+    return HistoricalMarketDefinition(
+        ticker=ticker,
+        series_ticker=str(raw_market.get("series_ticker") or CITY_CONFIG[city_key]["kalshi_series"]),
+        city_key=city_key,
+        city_name=str(CITY_CONFIG[city_key]["name"]),
+        target_date=target_date,
+        bucket_low=bucket_low,
+        bucket_high=bucket_high,
+        strike_label=normalized_label,
+        title=title,
+        subtitle=subtitle,
+        actual_high_f=actual_high,
+        status=str(raw_market.get("status") or "settled"),
+        open_time=_parse_datetime(raw_market.get("open_time")),
+        close_time=_parse_datetime(raw_market.get("close_time")),
+        settlement_time=_parse_datetime(raw_market.get("settlement_ts")),
+        volume=float(raw_market.get("volume_fp") or raw_market.get("volume") or 0.0),
+        open_interest=float(raw_market.get("open_interest_fp") or raw_market.get("open_interest") or 0.0),
+        use_historical_api=use_historical_api,
+    )
+
+
+def fetch_historical_market_definitions(
+    settings: Settings,
+    start_date: date,
+    end_date: date,
+) -> List[HistoricalMarketDefinition]:
+    """Fetch settled KXHIGH markets for a target-date range."""
+
+    if end_date < start_date:
+        raise ValueError("end_date must be on or after start_date")
+
+    client = KalshiClient(settings)
+    cutoff = None
+    try:
+        cutoff = client.get_historical_cutoff()
+    except httpx.HTTPError:
+        cutoff = None
+
+    min_settled = int(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    max_settled = int(datetime.combine(end_date + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+
+    recent_start = min_settled
+    recent_end = max_settled
+    historical_start = None
+    historical_end = None
+    if cutoff is not None:
+        cutoff_ts = int(cutoff.timestamp())
+        if min_settled < cutoff_ts:
+            historical_start = min_settled
+            historical_end = min(max_settled, cutoff_ts)
+            recent_start = max(min_settled, cutoff_ts)
+        if max_settled <= cutoff_ts:
+            recent_start = recent_end = None
+
+    all_markets: Dict[str, HistoricalMarketDefinition] = {}
+    for city_key in settings.tradable_cities:
+        city = CITY_CONFIG.get(city_key)
+        if city is None:
+            continue
+        series_ticker = str(city["kalshi_series"])
+        query_ranges = [
+            (False, recent_start, recent_end),
+            (True, historical_start, historical_end),
+        ]
+        for historical, range_start, range_end in query_ranges:
+            if range_start is None or range_end is None or range_start >= range_end:
+                continue
+            cursor: Optional[str] = None
+            while True:
+                try:
+                    payload = client.list_markets(
+                        series_ticker,
+                        cursor=cursor,
+                        status="settled",
+                        min_settled_ts=range_start,
+                        max_settled_ts=range_end,
+                        historical=historical,
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning("Kalshi historical market request failed for %s: %s", series_ticker, exc)
+                    break
+                raw_markets = payload.get("markets", [])
+                for raw_market in raw_markets:
+                    market = _normalize_historical_market(raw_market, city_key, use_historical_api=historical)
+                    if market is None:
+                        continue
+                    if not (start_date <= market.target_date <= end_date):
+                        continue
+                    all_markets[market.ticker] = market
+                cursor = payload.get("cursor")
+                if not cursor or not raw_markets:
+                    break
+    return sorted(all_markets.values(), key=lambda item: (item.target_date, item.city_key, item.ticker))
+
+
+def _candlestick_close(item: Dict[str, Any], key: str) -> float:
+    values = item.get(key)
+    if not isinstance(values, dict):
+        return 0.0
+    return _convert_dollars(values.get("close_dollars"))
+
+
+def fetch_historical_market_quote(
+    settings: Settings,
+    market: HistoricalMarketDefinition,
+    *,
+    entry_time_utc: datetime,
+    period_interval_minutes: int = 60,
+    lookback_hours: int = 6,
+) -> Optional[MarketQuote]:
+    """Fetch the latest pre-entry historical quote for a settled market."""
+
+    if entry_time_utc.tzinfo is None:
+        entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+    else:
+        entry_time_utc = entry_time_utc.astimezone(timezone.utc)
+
+    client = KalshiClient(settings)
+
+    start_ts = int((entry_time_utc - timedelta(hours=lookback_hours)).timestamp())
+    end_ts = int(entry_time_utc.timestamp())
+    try:
+        payload = client.get_market_candlesticks(
+            series_ticker=market.series_ticker,
+            ticker=market.ticker,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            period_interval=period_interval_minutes,
+            historical=market.use_historical_api,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Kalshi candlestick request failed for %s: %s", market.ticker, exc)
+        return None
+
+    candlesticks = payload.get("candlesticks", [])
+    if not candlesticks:
+        return None
+    latest = max(candlesticks, key=lambda item: int(item.get("end_period_ts") or 0))
+    yes_bid = _candlestick_close(latest, "yes_bid")
+    yes_ask = _candlestick_close(latest, "yes_ask")
+    last_price = _candlestick_close(latest, "price")
+    if yes_bid <= 0.0 and yes_ask <= 0.0 and last_price <= 0.0:
+        return None
+
+    no_bid = max(0.0, min(1.0, 1.0 - yes_ask)) if yes_ask > 0.0 else max(0.0, 1.0 - last_price)
+    no_ask = max(0.0, min(1.0, 1.0 - yes_bid)) if yes_bid > 0.0 else max(0.0, 1.0 - last_price)
+    return MarketQuote(
+        ticker=market.ticker,
+        series_ticker=market.series_ticker,
+        city_key=market.city_key,
+        city_name=market.city_name,
+        target_date=market.target_date,
+        bucket_low=market.bucket_low,
+        bucket_high=market.bucket_high,
+        strike_label=market.strike_label,
+        title=market.title,
+        subtitle=market.subtitle,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask if yes_ask > 0.0 else max(yes_bid, last_price),
+        no_bid=no_bid,
+        no_ask=no_ask,
+        last_price=last_price if last_price > 0.0 else max(yes_bid, yes_ask, 0.5),
+        volume=float(latest.get("volume_fp") or market.volume),
+        open_interest=float(latest.get("open_interest_fp") or market.open_interest),
+        updated_time=datetime.fromtimestamp(int(latest.get("end_period_ts") or end_ts), tz=timezone.utc),
+        status="settled",
+    )
