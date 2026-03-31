@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -59,7 +60,10 @@ class HistoricalBacktestCache:
         self.settings = settings
         self.entry_hour_utc = entry_hour_utc
         self.entry_minute_utc = entry_minute_utc
-        self.base_dir = settings.cache_dir / "historical_backtest"
+        self.base_dir = settings.historical_data_dir
+        legacy_dir = settings.cache_dir / "historical_backtest"
+        if self.base_dir != legacy_dir and not self.base_dir.exists() and legacy_dir.exists():
+            shutil.copytree(legacy_dir, self.base_dir, dirs_exist_ok=True)
         self.markets_dir = self.base_dir / "markets"
         self.quotes_dir = self.base_dir / "quotes"
         self.forecasts_dir = self.base_dir / "forecasts"

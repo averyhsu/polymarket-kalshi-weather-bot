@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "kalshi_weather_bot.sqlite3"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / ".cache"
+DEFAULT_HISTORICAL_DATA_DIR = PROJECT_ROOT / "historical_data" / "backtests"
 DEFAULT_USER_AGENT = "kalshi-weather-bot/1.0 (https://github.com/averyhsu/polymarket-kalshi-weather-bot)"
 
 
@@ -79,6 +80,7 @@ class Settings(BaseSettings):
     verbose: bool = Field(default=False, alias="VERBOSE")
     db_path: Path = Field(default=DEFAULT_DB_PATH, alias="DB_PATH")
     cache_dir: Path = Field(default=DEFAULT_CACHE_DIR, alias="CACHE_DIR")
+    historical_data_dir: Path = Field(default=DEFAULT_HISTORICAL_DATA_DIR, alias="HISTORICAL_DATA_DIR")
     user_agent: str = Field(default=DEFAULT_USER_AGENT, alias="USER_AGENT")
 
     kalshi_api_key_id: Optional[str] = Field(default=None, alias="KALSHI_API_KEY_ID")
@@ -181,6 +183,7 @@ def load_settings(overrides: Optional[Dict[str, object]] = None) -> Settings:
     settings = Settings()
     if not overrides:
         settings.cache_dir.mkdir(parents=True, exist_ok=True)
+        settings.historical_data_dir.mkdir(parents=True, exist_ok=True)
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         return settings
 
@@ -188,5 +191,6 @@ def load_settings(overrides: Optional[Dict[str, object]] = None) -> Settings:
     merged.update({key: value for key, value in overrides.items() if value is not None})
     updated = Settings(**merged)
     updated.cache_dir.mkdir(parents=True, exist_ok=True)
+    updated.historical_data_dir.mkdir(parents=True, exist_ok=True)
     updated.db_path.parent.mkdir(parents=True, exist_ok=True)
     return updated
