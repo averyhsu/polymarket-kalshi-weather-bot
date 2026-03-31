@@ -8,7 +8,7 @@ Both `paper` and `live` read the same live public Kalshi market data and live we
 - `live` = live inputs + real Kalshi order submission
 - `--dry-run` = run the logic without executing the trade
 
-Each CLI invocation runs one cycle. This repo does not run continuously unless you schedule repeated runs yourself.
+Each CLI invocation runs one cycle. This repo does not run continuously unless you schedule repeated runs yourself. Historical backtests can now reuse a local cached dataset under `.cache/historical_backtest`.
 
 ## Project Overview
 
@@ -164,6 +164,7 @@ python main.py --mode paper --balance 100 --dry-run
 python main.py --stats
 python main.py --positions
 python main.py --replay
+python main.py --warm-backtest-cache --backtest-days 30
 python main.py --backtest --backtest-days 14
 python main.py --close-all-paper
 ```
@@ -175,9 +176,11 @@ Paper mode is the main strategy-testing mode because it keeps a full local ledge
 Run a historical day-ahead backtest over settled markets:
 
 ```bash
+python main.py --warm-backtest-cache --backtest-days 30
 python main.py --backtest --backtest-days 14
 python main.py --backtest --backtest-start 2026-03-01 --backtest-end 2026-03-31
 python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
+python main.py --backtest --backtest-days 30 --backtest-refresh-cache
 ```
 
 What the backtest does:
@@ -188,6 +191,14 @@ What the backtest does:
 - runs the same probability, risk, decision, and Kelly sizing logic as live and paper mode
 - enters once per cycle and holds positions to settlement
 - reports P&L, drawdown, win rate, Brier score, skip reasons, and trade-level details
+- caches historical market definitions, entry quotes, and archived forecast snapshots locally so repeated backtests do not refetch the same month of data every time
+
+Recommended workflow:
+
+- run `python main.py --warm-backtest-cache --backtest-days 30` once to download the last month of backtest inputs
+- then run `python main.py --backtest --backtest-days 14` or any overlapping range and it will reuse the local cache
+- use `--backtest-refresh-cache` when you want to overwrite the saved dataset
+- use `--backtest-no-cache` if you explicitly want a one-off uncached run
 
 What it does not do yet:
 

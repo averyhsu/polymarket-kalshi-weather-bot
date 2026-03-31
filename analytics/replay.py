@@ -6,6 +6,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from config import Settings
@@ -14,8 +15,22 @@ from core.probability import estimate_bucket_probability
 from core.risk import assess_entry_risk
 from core.sizing import calculate_kelly_size
 from data.climatology import bucket_probability_from_climatology
-from data.markets import HistoricalMarketDefinition, MarketQuote, fetch_historical_market_definitions, fetch_historical_market_quote
-from data.weather import SourceHealth, fetch_historical_forecast_snapshot
+from data.markets import (
+    HistoricalMarketDefinition,
+    MarketQuote,
+    deserialize_historical_market,
+    deserialize_market_quote,
+    fetch_historical_market_definitions,
+    fetch_historical_market_quote,
+    serialize_historical_market,
+    serialize_market_quote,
+)
+from data.weather import (
+    SourceHealth,
+    deserialize_forecast_snapshot,
+    fetch_historical_forecast_snapshot,
+    serialize_forecast_snapshot,
+)
 from db.models import Database
 
 
@@ -35,6 +50,110 @@ class BacktestPosition:
     bucket_low: float
     bucket_high: float
     actual_high_f: float
+
+
+class HistoricalBacktestCache:
+    """Disk-backed cache for historical backtest datasets."""
+
+    def __init__(self, settings: Settings, *, entry_hour_utc: int, entry_minute_utc: int):
+        self.settings = settings
+        self.entry_hour_utc = entry_hour_utc
+        self.entry_minute_utc = entry_minute_utc
+        self.base_dir = settings.cache_dir / "historical_backtest"
+        self.markets_dir = self.base_dir / "markets"
+        self.quotes_dir = self.base_dir / "quotes"
+        self.forecasts_dir = self.base_dir / "forecasts"
+        for path in (self.markets_dir, self.quotes_dir, self.forecasts_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _cached_at() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _entry_stamp(self) -> str:
+        return f"{self.entry_hour_utc:02d}{self.entry_minute_utc:02d}Z"
+
+    def _markets_path(self, target_date: date) -> Path:
+        return self.markets_dir / f"{target_date.isoformat()}.json"
+
+    def _quotes_path(self, ticker: str) -> Path:
+        return self.quotes_dir / self._entry_stamp() / f"{ticker}.json"
+
+    def _forecasts_path(self, city_key: str, target_date: date) -> Path:
+        return self.forecasts_dir / self._entry_stamp() / f"{city_key}_{target_date.isoformat()}.json"
+
+    def load_markets(self, target_date: date) -> Optional[List[HistoricalMarketDefinition]]:
+        path = self._markets_path(target_date)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        try:
+            return [deserialize_historical_market(item) for item in payload.get("markets", [])]
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def save_markets(self, target_date: date, markets: List[HistoricalMarketDefinition]) -> None:
+        path = self._markets_path(target_date)
+        payload = {
+            "target_date": target_date.isoformat(),
+            "cached_at": self._cached_at(),
+            "markets": [serialize_historical_market(market) for market in markets],
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def load_quote(self, ticker: str) -> Optional[MarketQuote]:
+        path = self._quotes_path(ticker)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if payload.get("quote") is None:
+            return None
+        try:
+            return deserialize_market_quote(payload["quote"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def save_quote(self, ticker: str, quote: Optional[MarketQuote]) -> None:
+        path = self._quotes_path(ticker)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ticker": ticker,
+            "cached_at": self._cached_at(),
+            "quote": None if quote is None else serialize_market_quote(quote),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def load_forecast(self, city_key: str, target_date: date):
+        path = self._forecasts_path(city_key, target_date)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if payload.get("forecast") is None:
+            return None
+        try:
+            return deserialize_forecast_snapshot(payload["forecast"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def save_forecast(self, city_key: str, target_date: date, forecast) -> None:
+        path = self._forecasts_path(city_key, target_date)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "city_key": city_key,
+            "target_date": target_date.isoformat(),
+            "cached_at": self._cached_at(),
+            "forecast": None if forecast is None else serialize_forecast_snapshot(forecast),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def replay_from_database(settings: Settings, database: Database) -> Dict[str, object]:
@@ -155,6 +274,123 @@ def _settle_position(position: BacktestPosition, settings: Settings) -> Dict[str
     }
 
 
+def _load_or_fetch_markets(
+    settings: Settings,
+    cache: HistoricalBacktestCache,
+    *,
+    start_date: date,
+    end_date: date,
+    refresh_cache: bool,
+) -> List[HistoricalMarketDefinition]:
+    if refresh_cache:
+        markets = fetch_historical_market_definitions(settings, start_date, end_date)
+        grouped: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
+        for market in markets:
+            grouped[market.target_date].append(market)
+        for target_date in _daterange(start_date, end_date):
+            cache.save_markets(target_date, grouped.get(target_date, []))
+        return markets
+
+    loaded: List[HistoricalMarketDefinition] = []
+    missing_dates: List[date] = []
+    for target_date in _daterange(start_date, end_date):
+        cached = cache.load_markets(target_date)
+        if cached is None:
+            missing_dates.append(target_date)
+            continue
+        loaded.extend(cached)
+
+    if missing_dates:
+        fetched = fetch_historical_market_definitions(settings, min(missing_dates), max(missing_dates))
+        grouped: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
+        for market in fetched:
+            grouped[market.target_date].append(market)
+        for target_date in _daterange(min(missing_dates), max(missing_dates)):
+            cache.save_markets(target_date, grouped.get(target_date, []))
+        loaded.extend(
+            market for market in fetched
+            if start_date <= market.target_date <= end_date
+        )
+    return sorted(loaded, key=lambda item: (item.target_date, item.city_key, item.ticker))
+
+
+def warm_historical_backtest_cache(
+    settings: Settings,
+    *,
+    start_date: date,
+    end_date: date,
+    entry_hour_utc: int = 20,
+    entry_minute_utc: int = 0,
+    refresh_cache: bool = False,
+) -> Dict[str, object]:
+    """Download and persist a historical backtest dataset for later reuse."""
+
+    cache = HistoricalBacktestCache(
+        settings,
+        entry_hour_utc=entry_hour_utc,
+        entry_minute_utc=entry_minute_utc,
+    )
+    markets = _load_or_fetch_markets(
+        settings,
+        cache,
+        start_date=start_date,
+        end_date=end_date,
+        refresh_cache=refresh_cache,
+    )
+
+    quotes_cached = 0
+    forecasts_cached = 0
+    quote_fetches = 0
+    forecast_fetches = 0
+    cycle_start = start_date - timedelta(days=1)
+    cycle_end = end_date
+    markets_by_target: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
+    for market in markets:
+        markets_by_target[market.target_date].append(market)
+
+    for cycle_day in _daterange(cycle_start, cycle_end):
+        entry_time_utc = _entry_timestamp(cycle_day, entry_hour_utc, entry_minute_utc)
+        target_date = cycle_day + timedelta(days=1)
+        for market in markets_by_target.get(target_date, []):
+            if not refresh_cache and cache.load_quote(market.ticker) is not None:
+                quotes_cached += 1
+            else:
+                quote = fetch_historical_market_quote(settings, market, entry_time_utc=entry_time_utc)
+                cache.save_quote(market.ticker, quote)
+                quote_fetches += 1
+                if quote is not None:
+                    quotes_cached += 1
+
+            if not refresh_cache and cache.load_forecast(market.city_key, market.target_date) is not None:
+                forecasts_cached += 1
+            else:
+                forecast = fetch_historical_forecast_snapshot(
+                    settings,
+                    market.city_key,
+                    market.target_date,
+                    entry_time_utc=entry_time_utc,
+                )
+                cache.save_forecast(market.city_key, market.target_date, forecast)
+                forecast_fetches += 1
+                if forecast is not None:
+                    forecasts_cached += 1
+
+    return {
+        "cache": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "entry_time_utc": f"{entry_hour_utc:02d}:{entry_minute_utc:02d}",
+            "markets_cached": len(markets),
+            "quotes_cached": quotes_cached,
+            "forecasts_cached": forecasts_cached,
+            "quote_fetches": quote_fetches,
+            "forecast_fetches": forecast_fetches,
+            "cache_dir": str(cache.base_dir),
+            "refreshed": refresh_cache,
+        }
+    }
+
+
 def run_historical_backtest(
     settings: Settings,
     *,
@@ -162,6 +398,8 @@ def run_historical_backtest(
     end_date: date,
     entry_hour_utc: int = 20,
     entry_minute_utc: int = 0,
+    use_cache: bool = True,
+    refresh_cache: bool = False,
 ) -> Dict[str, object]:
     """Run a historical day-ahead backtest on settled KXHIGH markets.
 
@@ -173,7 +411,18 @@ def run_historical_backtest(
     if end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
-    markets = fetch_historical_market_definitions(settings, start_date, end_date)
+    cache = HistoricalBacktestCache(
+        settings,
+        entry_hour_utc=entry_hour_utc,
+        entry_minute_utc=entry_minute_utc,
+    )
+    markets = _load_or_fetch_markets(
+        settings,
+        cache,
+        start_date=start_date,
+        end_date=end_date,
+        refresh_cache=refresh_cache,
+    ) if use_cache else fetch_historical_market_definitions(settings, start_date, end_date)
     markets_by_target: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
     for market in markets:
         markets_by_target[market.target_date].append(market)
@@ -215,7 +464,11 @@ def run_historical_backtest(
         evaluated_today = 0
         for market in markets_by_target.get(target_date, []):
             evaluated_today += 1
-            quote = fetch_historical_market_quote(settings, market, entry_time_utc=entry_time_utc)
+            quote = cache.load_quote(market.ticker) if use_cache and not refresh_cache else None
+            if quote is None:
+                quote = fetch_historical_market_quote(settings, market, entry_time_utc=entry_time_utc)
+                if use_cache:
+                    cache.save_quote(market.ticker, quote)
             if quote is None:
                 skipped.append(f"{market.ticker}: historical quote unavailable")
                 continue
@@ -223,12 +476,17 @@ def run_historical_backtest(
 
             forecast_key = (market.city_key, market.target_date)
             if forecast_key not in forecast_cache:
-                forecast_cache[forecast_key] = fetch_historical_forecast_snapshot(
-                    settings,
-                    market.city_key,
-                    market.target_date,
-                    entry_time_utc=entry_time_utc,
-                )
+                cached_forecast = cache.load_forecast(market.city_key, market.target_date) if use_cache and not refresh_cache else None
+                if cached_forecast is None:
+                    cached_forecast = fetch_historical_forecast_snapshot(
+                        settings,
+                        market.city_key,
+                        market.target_date,
+                        entry_time_utc=entry_time_utc,
+                    )
+                    if use_cache:
+                        cache.save_forecast(market.city_key, market.target_date, cached_forecast)
+                forecast_cache[forecast_key] = cached_forecast
             forecast = forecast_cache[forecast_key]
             if forecast is None:
                 skipped.append(f"{market.ticker}: historical forecast unavailable")
@@ -377,5 +635,8 @@ def run_historical_backtest(
             "daily": daily_summaries,
             "trades": executed_trades[:100],
             "skipped": skipped[:100],
+            "cache_used": use_cache,
+            "cache_refreshed": refresh_cache,
+            "cache_dir": str(cache.base_dir) if use_cache else None,
         }
     }

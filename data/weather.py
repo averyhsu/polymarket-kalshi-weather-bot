@@ -105,14 +105,14 @@ def _cache_file(settings: Settings, city_key: str, target_date: date) -> Path:
     return settings.cache_dir / "weather" / f"{city_key}_{target_date.isoformat()}.json"
 
 
-def _serialize_snapshot(snapshot: ForecastSnapshot) -> Dict[str, object]:
+def serialize_forecast_snapshot(snapshot: ForecastSnapshot) -> Dict[str, object]:
     payload = asdict(snapshot)
     payload["target_date"] = snapshot.target_date.isoformat()
     payload["fetched_at"] = snapshot.fetched_at.isoformat()
     return payload
 
 
-def _deserialize_snapshot(payload: Dict[str, object]) -> ForecastSnapshot:
+def deserialize_forecast_snapshot(payload: Dict[str, object]) -> ForecastSnapshot:
     source_payload = dict(payload["source_health"])
     source_health = SourceHealth(**source_payload)
     return ForecastSnapshot(
@@ -136,7 +136,7 @@ def _load_cached_snapshot(settings: Settings, city_key: str, target_date: date) 
         return None
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        return _deserialize_snapshot(payload)
+        return deserialize_forecast_snapshot(payload)
     except (OSError, ValueError, TypeError):
         return None
 
@@ -144,7 +144,7 @@ def _load_cached_snapshot(settings: Settings, city_key: str, target_date: date) 
 def _persist_snapshot(settings: Settings, snapshot: ForecastSnapshot) -> None:
     cache_path = _cache_file(settings, snapshot.city_key, snapshot.target_date)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(_serialize_snapshot(snapshot), indent=2), encoding="utf-8")
+    cache_path.write_text(json.dumps(serialize_forecast_snapshot(snapshot), indent=2), encoding="utf-8")
 
 
 def _extract_member_highs(payload: Dict[str, object]) -> List[float]:

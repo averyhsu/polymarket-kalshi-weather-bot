@@ -24,11 +24,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stats", action="store_true", help="Print P&L and calibration stats")
     parser.add_argument("--replay", action="store_true", help="Replay decisions from stored snapshots")
     parser.add_argument("--backtest", action="store_true", help="Run a historical day-ahead backtest")
+    parser.add_argument("--warm-backtest-cache", action="store_true", help="Download and cache a historical backtest dataset")
     parser.add_argument("--backtest-start", type=str, help="Inclusive target-date start for backtests (YYYY-MM-DD)")
     parser.add_argument("--backtest-end", type=str, help="Inclusive target-date end for backtests (YYYY-MM-DD)")
     parser.add_argument("--backtest-days", type=int, help="Shortcut for a recent backtest window ending yesterday")
     parser.add_argument("--backtest-entry-hour-utc", type=int, default=20, help="Entry hour in UTC for backtests")
     parser.add_argument("--backtest-entry-minute-utc", type=int, default=0, help="Entry minute in UTC for backtests")
+    parser.add_argument("--backtest-no-cache", action="store_true", help="Ignore the local historical cache for this run")
+    parser.add_argument("--backtest-refresh-cache", action="store_true", help="Refetch and overwrite the cached historical dataset")
     parser.add_argument("--positions", action="store_true", help="Show open positions")
     parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
     return parser
@@ -54,6 +57,16 @@ def _parse_iso_date(raw_value: str) -> date:
     return date.fromisoformat(raw_value)
 
 
+def _resolve_backtest_window(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[date, date]:
+    if args.backtest_days:
+        end_date = date.today() - timedelta(days=1)
+        start_date = end_date - timedelta(days=max(args.backtest_days - 1, 0))
+        return start_date, end_date
+    if not args.backtest_start or not args.backtest_end:
+        parser.error("--backtest requires either --backtest-days or both --backtest-start and --backtest-end")
+    return _parse_iso_date(args.backtest_start), _parse_iso_date(args.backtest_end)
+
+
 def main() -> int:
     """Run the CLI."""
 
@@ -77,21 +90,28 @@ def main() -> int:
     if args.replay:
         _print_json(orchestrator.replay())
         return 0
+    if args.backtest or args.warm_backtest_cache:
+        start_date, end_date = _resolve_backtest_window(args, parser)
+    if args.warm_backtest_cache:
+        _print_json(
+            orchestrator.warm_backtest_cache(
+                start_date=start_date,
+                end_date=end_date,
+                entry_hour_utc=args.backtest_entry_hour_utc,
+                entry_minute_utc=args.backtest_entry_minute_utc,
+                refresh_cache=args.backtest_refresh_cache,
+            )
+        )
+        return 0
     if args.backtest:
-        if args.backtest_days:
-            end_date = date.today() - timedelta(days=1)
-            start_date = end_date - timedelta(days=max(args.backtest_days - 1, 0))
-        else:
-            if not args.backtest_start or not args.backtest_end:
-                parser.error("--backtest requires either --backtest-days or both --backtest-start and --backtest-end")
-            start_date = _parse_iso_date(args.backtest_start)
-            end_date = _parse_iso_date(args.backtest_end)
         _print_json(
             orchestrator.backtest(
                 start_date=start_date,
                 end_date=end_date,
                 entry_hour_utc=args.backtest_entry_hour_utc,
                 entry_minute_utc=args.backtest_entry_minute_utc,
+                use_cache=not args.backtest_no_cache,
+                refresh_cache=args.backtest_refresh_cache,
             )
         )
         return 0

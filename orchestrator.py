@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from analytics.calibration import summarize_calibration
 from analytics.pnl import summarize_pnl
-from analytics.replay import replay_from_database, run_historical_backtest
+from analytics.replay import replay_from_database, run_historical_backtest, warm_historical_backtest_cache
 from config import Settings
 from core.decision import choose_trade
 from core.exits import evaluate_exit
@@ -303,6 +303,8 @@ class WeatherTradingOrchestrator:
         end_date: date,
         entry_hour_utc: int = 20,
         entry_minute_utc: int = 0,
+        use_cache: bool = True,
+        refresh_cache: bool = False,
     ) -> Dict[str, object]:
         """Run a historical day-ahead backtest."""
 
@@ -312,6 +314,28 @@ class WeatherTradingOrchestrator:
             end_date=end_date,
             entry_hour_utc=entry_hour_utc,
             entry_minute_utc=entry_minute_utc,
+            use_cache=use_cache,
+            refresh_cache=refresh_cache,
+        )
+
+    def warm_backtest_cache(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        entry_hour_utc: int = 20,
+        entry_minute_utc: int = 0,
+        refresh_cache: bool = False,
+    ) -> Dict[str, object]:
+        """Download and persist the historical backtest dataset."""
+
+        return warm_historical_backtest_cache(
+            self.settings,
+            start_date=start_date,
+            end_date=end_date,
+            entry_hour_utc=entry_hour_utc,
+            entry_minute_utc=entry_minute_utc,
+            refresh_cache=refresh_cache,
         )
 
     def positions(self) -> List[PositionRecord]:

@@ -6,7 +6,7 @@ import base64
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -101,6 +101,77 @@ class HistoricalMarketDefinition:
     volume: float
     open_interest: float
     use_historical_api: bool = False
+
+
+def _serialize_datetime(value: Optional[datetime]) -> Optional[str]:
+    return None if value is None else value.isoformat()
+
+
+def _deserialize_datetime(value: Optional[str]) -> Optional[datetime]:
+    return None if value in (None, "") else datetime.fromisoformat(str(value))
+
+
+def serialize_historical_market(market: HistoricalMarketDefinition) -> Dict[str, Any]:
+    payload = asdict(market)
+    payload["target_date"] = market.target_date.isoformat()
+    payload["open_time"] = _serialize_datetime(market.open_time)
+    payload["close_time"] = _serialize_datetime(market.close_time)
+    payload["settlement_time"] = _serialize_datetime(market.settlement_time)
+    return payload
+
+
+def deserialize_historical_market(payload: Dict[str, Any]) -> HistoricalMarketDefinition:
+    return HistoricalMarketDefinition(
+        ticker=str(payload["ticker"]),
+        series_ticker=str(payload["series_ticker"]),
+        city_key=str(payload["city_key"]),
+        city_name=str(payload["city_name"]),
+        target_date=date.fromisoformat(str(payload["target_date"])),
+        bucket_low=float(payload["bucket_low"]),
+        bucket_high=float(payload["bucket_high"]),
+        strike_label=str(payload["strike_label"]),
+        title=str(payload["title"]),
+        subtitle=str(payload["subtitle"]),
+        actual_high_f=float(payload["actual_high_f"]),
+        status=str(payload["status"]),
+        open_time=_deserialize_datetime(payload.get("open_time")),
+        close_time=_deserialize_datetime(payload.get("close_time")),
+        settlement_time=_deserialize_datetime(payload.get("settlement_time")),
+        volume=float(payload["volume"]),
+        open_interest=float(payload["open_interest"]),
+        use_historical_api=bool(payload.get("use_historical_api", False)),
+    )
+
+
+def serialize_market_quote(quote: MarketQuote) -> Dict[str, Any]:
+    payload = asdict(quote)
+    payload["target_date"] = quote.target_date.isoformat()
+    payload["updated_time"] = _serialize_datetime(quote.updated_time)
+    return payload
+
+
+def deserialize_market_quote(payload: Dict[str, Any]) -> MarketQuote:
+    return MarketQuote(
+        ticker=str(payload["ticker"]),
+        series_ticker=str(payload["series_ticker"]),
+        city_key=str(payload["city_key"]),
+        city_name=str(payload["city_name"]),
+        target_date=date.fromisoformat(str(payload["target_date"])),
+        bucket_low=float(payload["bucket_low"]),
+        bucket_high=float(payload["bucket_high"]),
+        strike_label=str(payload["strike_label"]),
+        title=str(payload["title"]),
+        subtitle=str(payload["subtitle"]),
+        yes_bid=float(payload["yes_bid"]),
+        yes_ask=float(payload["yes_ask"]),
+        no_bid=float(payload["no_bid"]),
+        no_ask=float(payload["no_ask"]),
+        last_price=float(payload["last_price"]),
+        volume=float(payload["volume"]),
+        open_interest=float(payload["open_interest"]),
+        updated_time=_deserialize_datetime(payload.get("updated_time")),
+        status=str(payload["status"]),
+    )
 
 
 class KalshiClient:
