@@ -54,6 +54,20 @@ class WeatherTradingOrchestrator:
                 self._forecast_cache[key] = snapshot
         return self._forecast_cache.get(key)
 
+    def _position_mode(self) -> str:
+        return "paper" if self.settings.mode == "paper" else "live"
+
+    def _bankroll_reference(self) -> float:
+        if self.settings.mode == "paper":
+            summary = self.paper.summary()
+            return max(summary["starting_balance"], self.settings.initial_balance)
+        return max(self.settings.initial_balance, 0.0)
+
+    def _available_balance(self) -> float:
+        if self.settings.mode == "paper":
+            return max(self.paper.summary()["cash"], 0.0)
+        return max(self.settings.initial_balance, 0.0)
+
     def _probability_and_risk(
         self,
         market: MarketQuote,
@@ -77,8 +91,7 @@ class WeatherTradingOrchestrator:
             boundary_buffer_f=self.settings.boundary_buffer_f,
             min_sigma_f=self.settings.min_sigma_f,
         )
-        realized_today = self.database.aggregate_realized_pnl_today(date.today())
-        summary = self.paper.summary()
+        realized_today = self.database.aggregate_realized_pnl_today(date.today(), mode=self._position_mode())
         risk = assess_entry_risk(
             settings=self.settings,
             boundary_mass=probability.boundary_mass,
@@ -87,7 +100,7 @@ class WeatherTradingOrchestrator:
             source_health=forecast.source_health,
             open_positions=open_positions,
             realized_pnl_today=realized_today,
-            bankroll_reference=max(summary["starting_balance"], self.settings.initial_balance),
+            bankroll_reference=self._bankroll_reference(),
         )
         return probability, risk
 
@@ -137,7 +150,7 @@ class WeatherTradingOrchestrator:
 
         settled = 0
         now = datetime.utcnow()
-        for position in self.database.fetch_open_positions():
+        for position in self.database.fetch_open_positions(mode="paper"):
             target_date = date.fromisoformat(position.target_date)
             settle_after = datetime.combine(target_date, datetime.min.time()) + timedelta(
                 days=1,
@@ -158,7 +171,7 @@ class WeatherTradingOrchestrator:
 
         if self.settings.mode != "paper":
             return
-        open_positions = self.database.fetch_open_positions()
+        open_positions = self.database.fetch_open_positions(mode="paper")
         for position in open_positions:
             market = markets.get(position.ticker)
             if market is None:
@@ -202,7 +215,7 @@ class WeatherTradingOrchestrator:
         market_map = {market.ticker: market for market in markets}
         self.manage_open_positions(market_map, summary)
 
-        open_tickers = {position.ticker for position in self.database.fetch_open_positions()}
+        open_tickers = {position.ticker for position in self.database.fetch_open_positions(mode=self._position_mode())}
         for market in markets:
             if market.ticker in open_tickers:
                 continue
@@ -212,7 +225,11 @@ class WeatherTradingOrchestrator:
                 continue
             summary.forecasts_loaded += 1
             self._record_market_context(market, forecast)
-            probability, risk = self._probability_and_risk(market, forecast, len(self.database.fetch_open_positions()))
+            probability, risk = self._probability_and_risk(
+                market,
+                forecast,
+                len(self.database.fetch_open_positions(mode=self._position_mode())),
+            )
             decision = choose_trade(market=market, probability=probability, risk=risk, settings=self.settings)
             self.database.record_calibration(
                 ticker=market.ticker,
@@ -230,9 +247,8 @@ class WeatherTradingOrchestrator:
                 continue
 
             summary.entries_attempted += 1
-            account = self.paper.summary()
             sizing = calculate_kelly_size(
-                balance=max(account["cash"], 0.0),
+                balance=self._available_balance(),
                 probability=decision.win_probability,
                 cost=decision.price,
                 fee=self.settings.fee_per_contract,
@@ -271,7 +287,7 @@ class WeatherTradingOrchestrator:
         """Return combined performance and calibration statistics."""
 
         return {
-            "pnl": summarize_pnl(self.database),
+            "pnl": summarize_pnl(self.database, mode="paper"),
             "calibration": summarize_calibration(self.database),
         }
 
@@ -283,7 +299,7 @@ class WeatherTradingOrchestrator:
     def positions(self) -> List[PositionRecord]:
         """Return open positions."""
 
-        return self.database.fetch_open_positions()
+        return self.database.fetch_open_positions(mode=self._position_mode())
 
     def close_all_paper(self) -> int:
         """Close every open paper position at the stored mark price."""
@@ -291,7 +307,7 @@ class WeatherTradingOrchestrator:
         if self.settings.mode != "paper":
             return 0
         count = 0
-        for position in self.database.fetch_open_positions():
+        for position in self.database.fetch_open_positions(mode="paper"):
             fill_price = max(position.current_mark, 0.01)
             dummy_market = MarketQuote(
                 ticker=position.ticker,

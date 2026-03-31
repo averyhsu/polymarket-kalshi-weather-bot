@@ -84,6 +84,7 @@ class PaperBroker:
             metadata={"mode": "paper"},
         )
         position_id = self.database.open_position(
+            mode="paper",
             ticker=market.ticker,
             city_key=market.city_key,
             target_date=market.target_date.isoformat(),
@@ -204,7 +205,7 @@ class PaperBroker:
         """Return paper account balances and P&L."""
 
         cash = self.database.get_paper_cash()
-        positions = self.database.fetch_all_positions()
+        positions = self.database.fetch_all_positions(mode="paper")
         open_positions = [position for position in positions if position.status == "open"]
         closed_positions = [position for position in positions if position.status == "closed"]
         open_market_value = sum(position.current_mark * position.contracts for position in open_positions)

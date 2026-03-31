@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict
+from typing import Dict, Optional
 
 from db.models import Database
 
 
-def summarize_pnl(database: Database) -> Dict[str, object]:
+def summarize_pnl(database: Database, mode: Optional[str] = "paper") -> Dict[str, object]:
     """Build a P&L and win-rate summary from persisted state."""
 
-    positions = database.fetch_all_positions()
+    positions = database.fetch_all_positions(mode=mode)
     open_positions = [position for position in positions if position.status == "open"]
     closed_positions = [position for position in positions if position.status == "closed"]
     cash = database.get_paper_cash()

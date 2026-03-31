@@ -32,6 +32,7 @@ class PositionRecord:
     """Open or closed position stored in SQLite."""
 
     id: int
+    mode: str
     ticker: str
     city_key: str
     target_date: str
@@ -107,6 +108,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS positions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mode TEXT NOT NULL DEFAULT 'paper',
                     ticker TEXT NOT NULL,
                     city_key TEXT NOT NULL,
                     target_date TEXT NOT NULL,
@@ -180,10 +182,20 @@ class Database:
                 );
                 """
             )
+            self._ensure_column(connection, "positions", "mode", "TEXT NOT NULL DEFAULT 'paper'")
             if self.get_setting("paper_cash") is None:
                 self.set_setting("paper_cash", "0")
             if self.get_setting("paper_starting_balance") is None:
                 self.set_setting("paper_starting_balance", "0")
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing_columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            connection.commit()
 
     def get_setting(self, key: str) -> Optional[str]:
         with self.connect() as connection:
@@ -297,6 +309,7 @@ class Database:
     def open_position(
         self,
         *,
+        mode: str = "paper",
         ticker: str,
         city_key: str,
         target_date: str,
@@ -310,12 +323,13 @@ class Database:
             cursor = connection.execute(
                 """
                 INSERT INTO positions(
-                    ticker, city_key, target_date, side, contracts, avg_price, fill_price,
+                    mode, ticker, city_key, target_date, side, contracts, avg_price, fill_price,
                     current_mark, status, opened_at, entry_probability, current_probability,
                     metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
                 """,
                 (
+                    mode,
                     ticker,
                     city_key,
                     target_date,
@@ -363,14 +377,21 @@ class Database:
             )
             connection.commit()
 
-    def fetch_open_positions(self) -> List[PositionRecord]:
+    def fetch_open_positions(self, mode: Optional[str] = None) -> List[PositionRecord]:
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at ASC"
-            ).fetchall()
+            if mode is None:
+                rows = connection.execute(
+                    "SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at ASC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM positions WHERE status = 'open' AND mode = ? ORDER BY opened_at ASC",
+                    (mode,),
+                ).fetchall()
         return [
             PositionRecord(
                 id=int(row["id"]),
+                mode=str(row["mode"]),
                 ticker=str(row["ticker"]),
                 city_key=str(row["city_key"]),
                 target_date=str(row["target_date"]),
@@ -389,12 +410,19 @@ class Database:
             for row in rows
         ]
 
-    def fetch_all_positions(self) -> List[PositionRecord]:
+    def fetch_all_positions(self, mode: Optional[str] = None) -> List[PositionRecord]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM positions ORDER BY opened_at ASC").fetchall()
+            if mode is None:
+                rows = connection.execute("SELECT * FROM positions ORDER BY opened_at ASC").fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM positions WHERE mode = ? ORDER BY opened_at ASC",
+                    (mode,),
+                ).fetchall()
         return [
             PositionRecord(
                 id=int(row["id"]),
+                mode=str(row["mode"]),
                 ticker=str(row["ticker"]),
                 city_key=str(row["city_key"]),
                 target_date=str(row["target_date"]),
@@ -544,16 +572,26 @@ class Database:
             )
             connection.commit()
 
-    def aggregate_realized_pnl_today(self, trading_day: date) -> float:
+    def aggregate_realized_pnl_today(self, trading_day: date, mode: Optional[str] = None) -> float:
         with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT COALESCE(SUM(realized_pnl), 0.0) AS total
-                FROM positions
-                WHERE status = 'closed' AND substr(closed_at, 1, 10) = ?
-                """,
-                (trading_day.isoformat(),),
-            ).fetchone()
+            if mode is None:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(SUM(realized_pnl), 0.0) AS total
+                    FROM positions
+                    WHERE status = 'closed' AND substr(closed_at, 1, 10) = ?
+                    """,
+                    (trading_day.isoformat(),),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(SUM(realized_pnl), 0.0) AS total
+                    FROM positions
+                    WHERE status = 'closed' AND mode = ? AND substr(closed_at, 1, 10) = ?
+                    """,
+                    (mode, trading_day.isoformat()),
+                ).fetchone()
             return 0.0 if row is None else float(row["total"])
 
     def aggregate_fees(self) -> float:
@@ -593,8 +631,8 @@ class Database:
             ).fetchall()
             return list(rows)
 
-    def close_all_open_positions(self, mark_price: float, reason: str) -> int:
-        open_positions = self.fetch_open_positions()
+    def close_all_open_positions(self, mark_price: float, reason: str, mode: Optional[str] = None) -> int:
+        open_positions = self.fetch_open_positions(mode=mode)
         count = 0
         for position in open_positions:
             realized = (mark_price - position.avg_price) * position.contracts
