@@ -23,6 +23,7 @@ def _settings(cache_dir: Path | None = None):
     }
     if cache_dir is not None:
         overrides["cache_dir"] = cache_dir
+        overrides["historical_data_dir"] = cache_dir / "historical_data"
     return load_settings(overrides)
 
 

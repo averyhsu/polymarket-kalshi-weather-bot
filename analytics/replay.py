@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from data.weather import (
     serialize_forecast_snapshot,
 )
 from db.models import Database
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -329,6 +332,13 @@ def warm_historical_backtest_cache(
 ) -> Dict[str, object]:
     """Download and persist a historical backtest dataset for later reuse."""
 
+    logger.info(
+        "Warming historical backtest dataset for %s to %s at %02d:%02d UTC",
+        start_date.isoformat(),
+        end_date.isoformat(),
+        entry_hour_utc,
+        entry_minute_utc,
+    )
     cache = HistoricalBacktestCache(
         settings,
         entry_hour_utc=entry_hour_utc,
@@ -341,6 +351,7 @@ def warm_historical_backtest_cache(
         end_date=end_date,
         refresh_cache=refresh_cache,
     )
+    logger.info("Loaded %d settled market definitions into the dataset plan", len(markets))
 
     quotes_cached = 0
     forecasts_cached = 0
@@ -352,21 +363,38 @@ def warm_historical_backtest_cache(
     for market in markets:
         markets_by_target[market.target_date].append(market)
 
-    for cycle_day in _daterange(cycle_start, cycle_end):
+    cycle_days = _daterange(cycle_start, cycle_end)
+    total_cycles = len(cycle_days)
+    for cycle_index, cycle_day in enumerate(cycle_days, start=1):
         entry_time_utc = _entry_timestamp(cycle_day, entry_hour_utc, entry_minute_utc)
         target_date = cycle_day + timedelta(days=1)
-        for market in markets_by_target.get(target_date, []):
+        target_markets = markets_by_target.get(target_date, [])
+        logger.info(
+            "[%d/%d] Processing target date %s (%d markets)",
+            cycle_index,
+            total_cycles,
+            target_date.isoformat(),
+            len(target_markets),
+        )
+        day_quote_hits = 0
+        day_quote_fetches = 0
+        day_forecast_hits = 0
+        day_forecast_fetches = 0
+        for market in target_markets:
             if not refresh_cache and cache.load_quote(market.ticker) is not None:
                 quotes_cached += 1
+                day_quote_hits += 1
             else:
                 quote = fetch_historical_market_quote(settings, market, entry_time_utc=entry_time_utc)
                 cache.save_quote(market.ticker, quote)
                 quote_fetches += 1
+                day_quote_fetches += 1
                 if quote is not None:
                     quotes_cached += 1
 
             if not refresh_cache and cache.load_forecast(market.city_key, market.target_date) is not None:
                 forecasts_cached += 1
+                day_forecast_hits += 1
             else:
                 forecast = fetch_historical_forecast_snapshot(
                     settings,
@@ -376,8 +404,31 @@ def warm_historical_backtest_cache(
                 )
                 cache.save_forecast(market.city_key, market.target_date, forecast)
                 forecast_fetches += 1
+                day_forecast_fetches += 1
                 if forecast is not None:
                     forecasts_cached += 1
+        logger.info(
+            "[%d/%d] Finished %s: quotes cached=%d fetched=%d | forecasts cached=%d fetched=%d | cumulative quotes=%d/%d forecasts=%d/%d",
+            cycle_index,
+            total_cycles,
+            target_date.isoformat(),
+            day_quote_hits,
+            day_quote_fetches,
+            day_forecast_hits,
+            day_forecast_fetches,
+            quotes_cached,
+            quotes_cached + quote_fetches,
+            forecasts_cached,
+            forecasts_cached + forecast_fetches,
+        )
+
+    logger.info(
+        "Historical dataset ready at %s (markets=%d, quotes=%d, forecasts=%d)",
+        cache.base_dir,
+        len(markets),
+        quotes_cached,
+        forecasts_cached,
+    )
 
     return {
         "cache": {
