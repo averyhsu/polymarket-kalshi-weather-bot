@@ -8,6 +8,7 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Dict
 
+from analytics.backtest_reporting import build_backtest_result_package, render_backtest_terminal_report
 from config import load_settings
 from orchestrator import WeatherTradingOrchestrator
 
@@ -32,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backtest-entry-minute-utc", type=int, default=0, help="Entry minute in UTC for backtests")
     parser.add_argument("--backtest-no-cache", action="store_true", help="Ignore the local historical cache for this run")
     parser.add_argument("--backtest-refresh-cache", action="store_true", help="Refetch and overwrite the cached historical dataset")
+    parser.add_argument("--backtest-raw", action="store_true", help="Print the full machine-readable backtest package as JSON")
+    parser.add_argument("--backtest-no-save", action="store_true", help="Do not save JSON and Markdown artifacts for this backtest run")
     parser.add_argument("--positions", action="store_true", help="Show open positions")
     parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
     return parser
@@ -104,7 +107,7 @@ def main() -> int:
         )
         return 0
     if args.backtest:
-        _print_json(
+        result = build_backtest_result_package(
             orchestrator.backtest(
                 start_date=start_date,
                 end_date=end_date,
@@ -112,8 +115,14 @@ def main() -> int:
                 entry_minute_utc=args.backtest_entry_minute_utc,
                 use_cache=not args.backtest_no_cache,
                 refresh_cache=args.backtest_refresh_cache,
-            )
+            ),
+            settings,
+            save_artifacts=not args.backtest_no_save,
         )
+        if args.backtest_raw:
+            _print_json(result)
+        else:
+            print(render_backtest_terminal_report(result))
         return 0
     if args.positions:
         positions = [

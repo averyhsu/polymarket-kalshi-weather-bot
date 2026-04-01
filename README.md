@@ -182,6 +182,8 @@ python main.py --backtest --backtest-days 14
 python main.py --backtest --backtest-start 2026-03-01 --backtest-end 2026-03-31
 python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
 python main.py --backtest --backtest-days 30 --backtest-refresh-cache
+python main.py --backtest --backtest-days 30 --backtest-raw
+python main.py --backtest --backtest-days 30 --backtest-no-save
 ```
 
 What the backtest does:
@@ -201,6 +203,25 @@ Recommended workflow:
 - use `--backtest-refresh-cache` when you want to overwrite the saved dataset
 - use `--backtest-no-cache` if you explicitly want a one-off uncached run
 - by default the saved dataset lives in `historical_data/backtests`; set `HISTORICAL_DATA_DIR` if you want to keep it somewhere else
+
+Backtest output now has two layers:
+
+- terminal output is a human-readable summary by default
+- each run is also saved under `historical_data/backtests/results`
+- every saved run gets:
+  - one JSON artifact with the full machine-readable result, including all trades and skips
+  - one Markdown report with the same run summarized for humans
+
+Useful flags:
+
+- `--backtest-raw` prints the full machine-readable backtest package to stdout as JSON
+- `--backtest-no-save` skips writing the JSON and Markdown artifacts for that run
+
+This makes it easier to compare model iterations over time:
+
+- use the terminal summary for quick evaluation
+- open the saved Markdown report for a readable archive of the run
+- use the saved JSON artifact when you want every trade, skip, and metric in full detail
 
 What it does not do yet:
 
