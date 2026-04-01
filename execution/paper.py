@@ -197,7 +197,10 @@ class PaperBroker:
             settled_value=yes_settles,
             bucket_low=bucket_low,
             bucket_high=bucket_high,
-            metadata={"settlement_high": observed_high},
+            metadata={
+                "settlement_high": observed_high,
+                "entry_price": position.avg_price,
+            },
         )
         return ExecutionResult(True, None, position.id, payout, position.contracts, "paper position settled")
 

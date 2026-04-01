@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional
@@ -26,6 +27,45 @@ def _parse_csv(value: object) -> List[str]:
     if not text:
         return []
     return [part.strip().lower() for part in text.split(",") if part.strip()]
+
+
+def _parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"cannot parse boolean value from {value!r}")
+
+
+def _parse_float_mapping(value: object) -> Dict[str, float]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(key).strip().lower(): float(item) for key, item in value.items()}
+    text = str(value).strip()
+    if not text:
+        return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("mapping config must decode to an object")
+    return {str(key).strip().lower(): float(item) for key, item in parsed.items()}
+
+
+def _parse_bool_mapping(value: object) -> Dict[str, bool]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(key).strip().lower(): _parse_bool(item) for key, item in value.items()}
+    text = str(value).strip()
+    if not text:
+        return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise ValueError("mapping config must decode to an object")
+    return {str(key).strip().lower(): _parse_bool(item) for key, item in parsed.items()}
 
 
 @dataclass(frozen=True)
@@ -99,6 +139,7 @@ class Settings(BaseSettings):
         alias="BLACKLISTED_CITIES",
     )
     no_only: bool = Field(default=False, alias="NO_ONLY")
+    yes_enabled: bool = Field(default=True, alias="YES_ENABLED")
     skip_same_day: bool = Field(default=True, alias="SKIP_SAME_DAY")
     day_ahead_only: bool = Field(default=True, alias="DAY_AHEAD_ONLY")
 
@@ -115,10 +156,30 @@ class Settings(BaseSettings):
     slippage_per_contract: float = Field(default=0.005, alias="SLIPPAGE_PER_CONTRACT")
 
     base_min_ev: float = Field(default=0.04, alias="BASE_MIN_EV")
+    yes_min_ev: float = Field(default=0.08, alias="YES_MIN_EV")
+    no_min_ev: float = Field(default=0.04, alias="NO_MIN_EV")
     max_spread_cents: int = Field(default=5, alias="MAX_SPREAD_CENTS")
     min_volume: float = Field(default=25.0, alias="MIN_VOLUME")
     min_price_cents: int = Field(default=2, alias="MIN_PRICE_CENTS")
     max_price_cents: int = Field(default=98, alias="MAX_PRICE_CENTS")
+    yes_min_price_cents: int = Field(default=10, alias="YES_MIN_PRICE_CENTS")
+    yes_kelly_fraction_mult: float = Field(default=0.35, alias="YES_KELLY_FRACTION_MULT")
+    max_positions_per_city_day: int = Field(default=3, alias="MAX_POSITIONS_PER_CITY_DAY")
+    city_ev_buffer_overrides: Annotated[Dict[str, float], NoDecode] = Field(
+        default_factory=lambda: {"chicago": 0.02},
+        alias="CITY_EV_BUFFER_OVERRIDES",
+    )
+    city_enabled_overrides: Annotated[Dict[str, bool], NoDecode] = Field(
+        default_factory=dict,
+        alias="CITY_ENABLED_OVERRIDES",
+    )
+    calibration_enabled: bool = Field(default=True, alias="CALIBRATION_ENABLED")
+    calibration_pseudo_count: float = Field(default=12.0, alias="CALIBRATION_PSEUDO_COUNT")
+    tail_yes_price_cents: int = Field(default=12, alias="TAIL_YES_PRICE_CENTS")
+    tail_yes_probability_threshold: float = Field(default=0.58, alias="TAIL_YES_PROBABILITY_THRESHOLD")
+    tail_uncertainty_threshold: float = Field(default=0.35, alias="TAIL_UNCERTAINTY_THRESHOLD")
+    tail_risk_penalty: float = Field(default=0.03, alias="TAIL_RISK_PENALTY")
+    ranking_spread_weight: float = Field(default=0.002, alias="RANKING_SPREAD_WEIGHT")
 
     take_profit_cents: int = Field(default=10, alias="TAKE_PROFIT_CENTS")
     stop_loss_cents: int = Field(default=15, alias="STOP_LOSS_CENTS")
@@ -159,6 +220,16 @@ class Settings(BaseSettings):
     def parse_city_lists(cls, value: object) -> List[str]:
         return _parse_csv(value)
 
+    @field_validator("city_ev_buffer_overrides", mode="before")
+    @classmethod
+    def parse_city_ev_mapping(cls, value: object) -> Dict[str, float]:
+        return _parse_float_mapping(value)
+
+    @field_validator("city_enabled_overrides", mode="before")
+    @classmethod
+    def parse_city_enabled_mapping(cls, value: object) -> Dict[str, bool]:
+        return _parse_bool_mapping(value)
+
     @property
     def active_profile(self) -> ProfilePreset:
         return PROFILE_PRESETS[self.profile]
@@ -166,7 +237,11 @@ class Settings(BaseSettings):
     @property
     def tradable_cities(self) -> List[str]:
         blacklist = set(self.blacklisted_cities)
-        return [city for city in self.enabled_cities if city not in blacklist]
+        return [
+            city
+            for city in self.enabled_cities
+            if city not in blacklist and self.city_enabled_overrides.get(city, True)
+        ]
 
     @property
     def live_enabled(self) -> bool:
@@ -175,6 +250,9 @@ class Settings(BaseSettings):
     @property
     def kalshi_credentials_present(self) -> bool:
         return bool(self.kalshi_api_key_id and self.kalshi_private_key_path)
+
+    def city_ev_buffer(self, city_key: str) -> float:
+        return float(self.city_ev_buffer_overrides.get(city_key.lower(), 0.0))
 
 
 def load_settings(overrides: Optional[Dict[str, object]] = None) -> Settings:

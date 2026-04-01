@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from config import Settings
 
@@ -16,6 +16,7 @@ def build_backtest_result_package(
     settings: Settings,
     *,
     save_artifacts: bool = True,
+    baseline_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Build a human-friendly package around a raw backtest result."""
 
@@ -46,6 +47,8 @@ def build_backtest_result_package(
             "backtest": backtest,
         },
     }
+    if baseline_path is not None:
+        package["comparison"] = _build_comparison(package, baseline_path)
     if save_artifacts:
         _write_artifacts(package, json_path=json_path, markdown_path=markdown_path)
     return package
@@ -83,6 +86,12 @@ def render_backtest_terminal_report(package: Dict[str, Any]) -> str:
         f"- Settled positions: {summary['settled_positions']}",
         f"- Final settlements: {summary['final_settlements']}",
         "",
+        "Candidates",
+        f"- Approved candidates: {diagnostics['candidate_summary']['approved_candidates']}",
+        f"- Selected candidates: {diagnostics['candidate_summary']['selected_candidates']}",
+        f"- Approved but not selected: {diagnostics['candidate_summary']['approved_not_selected']}",
+        f"- Rejected candidates: {diagnostics['candidate_summary']['rejected_candidates']}",
+        "",
         "By Side",
     ]
     lines.extend(_render_breakdown(diagnostics["by_side"]))
@@ -115,6 +124,18 @@ def render_backtest_terminal_report(package: Dict[str, Any]) -> str:
         )
     else:
         lines.append(f"- Saving disabled for this run. Results directory: {artifacts['results_dir']}")
+    comparison = package.get("comparison")
+    if comparison is not None:
+        lines.extend(
+            [
+                "",
+                "Baseline Delta",
+                f"- Baseline file: {comparison['baseline_path']}",
+                f"- P&L delta: {_fmt_signed_currency(comparison['total_pnl_delta'])}",
+                f"- Return delta: {_fmt_pct(comparison['return_pct_delta'])}",
+                f"- Drawdown delta: {_fmt_pct(comparison['max_drawdown_delta'])}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -161,6 +182,15 @@ def render_backtest_markdown_report(package: Dict[str, Any]) -> str:
         f"| Entries executed | {summary['entries_executed']} |",
         f"| Settled positions | {summary['settled_positions']} |",
         f"| Final settlements | {summary['final_settlements']} |",
+        "",
+        "## Candidate Summary",
+        "",
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Approved candidates | {diagnostics['candidate_summary']['approved_candidates']} |",
+        f"| Selected candidates | {diagnostics['candidate_summary']['selected_candidates']} |",
+        f"| Approved but not selected | {diagnostics['candidate_summary']['approved_not_selected']} |",
+        f"| Rejected candidates | {diagnostics['candidate_summary']['rejected_candidates']} |",
         "",
         "## By Side",
         "",
@@ -221,6 +251,59 @@ def render_backtest_markdown_report(package: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## EV Bin Performance",
+            "",
+            "| Bin | Trades | Win Rate | Realized P&L |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for item in diagnostics["ev_bins"]:
+        lines.append(f"| {item['name']} | {item['trades']} | {_fmt_pct(item['win_rate'])} | {_fmt_signed_currency(item['realized_pnl'])} |")
+    lines.extend(
+        [
+            "",
+            "## Price Bin Performance",
+            "",
+            "| Bin | Trades | Win Rate | Realized P&L |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for item in diagnostics["price_bins"]:
+        lines.append(f"| {item['name']} | {item['trades']} | {_fmt_pct(item['win_rate'])} | {_fmt_signed_currency(item['realized_pnl'])} |")
+    lines.extend(
+        [
+            "",
+            "## Concentration By City/Date",
+            "",
+            "| City/Date | Trades | Realized P&L |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    for item in diagnostics["city_date_concentration"]:
+        lines.append(f"| {item['name']} | {item['trades']} | {_fmt_signed_currency(item['realized_pnl'])} |")
+    lines.extend(
+        [
+            "",
+            "## Candidate Ranking",
+            "",
+            "| Bucket | Ticker | Side | Rank Score | EV |",
+            "| --- | --- | --- | ---: | ---: |",
+        ]
+    )
+    for bucket_name, items in (
+        ("selected", diagnostics["selected_candidates"]),
+        ("approved_not_selected", diagnostics["approved_not_selected"]),
+    ):
+        if not items:
+            lines.append(f"| {bucket_name} | None | - | 0.000 | 0.000 |")
+            continue
+        for item in items:
+            lines.append(
+                f"| {bucket_name} | {item['ticker']} | {item['side']} | {item['ranking_score']:.3f} | {item['expected_value']:.3f} |"
+            )
+    lines.extend(
+        [
+            "",
             "## Trade Ledger",
             "",
             "| Ticker | Date | City | Side | Contracts | Entry | Predicted YES | Payout | P&L |",
@@ -242,6 +325,19 @@ def render_backtest_markdown_report(package: Dict[str, Any]) -> str:
             f"- Markdown report: {artifacts['markdown_path']}",
         ]
     )
+    comparison = package.get("comparison")
+    if comparison is not None:
+        lines.extend(
+            [
+                "",
+                "## Baseline Comparison",
+                "",
+                f"- Baseline file: {comparison['baseline_path']}",
+                f"- Total P&L delta: {_fmt_signed_currency(comparison['total_pnl_delta'])}",
+                f"- Return delta: {_fmt_pct(comparison['return_pct_delta'])}",
+                f"- Max drawdown delta: {_fmt_pct(comparison['max_drawdown_delta'])}",
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -295,6 +391,7 @@ def _build_summary(backtest: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_diagnostics(backtest: Dict[str, Any]) -> Dict[str, Any]:
     trades = list(backtest["trades"])
+    candidates = list(backtest.get("candidates", []))
     return {
         "by_city": _normalize_breakdown(backtest["by_city"]),
         "by_side": _normalize_breakdown(backtest["by_side"], preferred_order=["NO", "YES"]),
@@ -302,6 +399,12 @@ def _build_diagnostics(backtest: Dict[str, Any]) -> Dict[str, Any]:
         "top_winners": _top_trades(trades, reverse=True),
         "top_losers": _top_trades(trades, reverse=False),
         "skip_reasons": _summarize_skip_reasons(list(backtest["skipped"])),
+        "candidate_summary": _summarize_candidates(candidates),
+        "selected_candidates": _top_candidates(candidates, selected=True),
+        "approved_not_selected": _top_candidates(candidates, selected=False, approved=True),
+        "ev_bins": _bin_trade_performance(trades, key="expected_value"),
+        "price_bins": _bin_trade_performance(trades, key="entry_price"),
+        "city_date_concentration": _city_date_concentration(trades),
     }
 
 
@@ -372,6 +475,82 @@ def _top_trades(trades: List[Dict[str, Any]], *, reverse: bool) -> List[Dict[str
     ]
 
 
+def _summarize_candidates(candidates: List[Dict[str, Any]]) -> Dict[str, int]:
+    approved = [item for item in candidates if bool(item.get("approved"))]
+    selected = [item for item in approved if bool(item.get("selected"))]
+    return {
+        "approved_candidates": len(approved),
+        "selected_candidates": len(selected),
+        "approved_not_selected": len([item for item in approved if not bool(item.get("selected"))]),
+        "rejected_candidates": len([item for item in candidates if not bool(item.get("approved"))]),
+    }
+
+
+def _top_candidates(candidates: List[Dict[str, Any]], *, selected: bool, approved: bool = True) -> List[Dict[str, Any]]:
+    filtered = [
+        item
+        for item in candidates
+        if bool(item.get("selected")) == selected and bool(item.get("approved")) == approved
+    ]
+    ranked = sorted(
+        filtered,
+        key=lambda item: (float(item.get("ranking_score", 0.0)), float(item.get("expected_value", 0.0))),
+        reverse=True,
+    )
+    return [
+        {
+            "ticker": str(item["ticker"]),
+            "side": str(item.get("side", "NONE")),
+            "ranking_score": float(item.get("ranking_score", 0.0)),
+            "expected_value": float(item.get("expected_value", 0.0)),
+        }
+        for item in ranked[:5]
+    ]
+
+
+def _bin_trade_performance(trades: List[Dict[str, Any]], *, key: str) -> List[Dict[str, Any]]:
+    if key == "expected_value":
+        bins = [
+            ("0.00-0.10", 0.0, 0.10),
+            ("0.10-0.20", 0.10, 0.20),
+            ("0.20-0.35", 0.20, 0.35),
+            ("0.35+", 0.35, float("inf")),
+        ]
+    else:
+        bins = [
+            ("0-10c", 0.0, 0.10),
+            ("10-25c", 0.10, 0.25),
+            ("25-50c", 0.25, 0.50),
+            ("50-75c", 0.50, 0.75),
+            ("75c+", 0.75, float("inf")),
+        ]
+    rows: List[Dict[str, Any]] = []
+    for label, lower, upper in bins:
+        bucket = [trade for trade in trades if lower <= float(trade[key]) < upper]
+        if not bucket:
+            continue
+        wins = sum(1 for trade in bucket if float(trade["realized_pnl"]) > 0)
+        rows.append(
+            {
+                "name": label,
+                "trades": len(bucket),
+                "win_rate": wins / len(bucket),
+                "realized_pnl": sum(float(trade["realized_pnl"]) for trade in bucket),
+            }
+        )
+    return rows
+
+
+def _city_date_concentration(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for trade in trades:
+        label = f"{trade['city']} {trade['target_date']}"
+        grouped.setdefault(label, {"name": label, "trades": 0, "realized_pnl": 0.0})
+        grouped[label]["trades"] += 1
+        grouped[label]["realized_pnl"] += float(trade["realized_pnl"])
+    return sorted(grouped.values(), key=lambda item: (item["trades"], abs(item["realized_pnl"])), reverse=True)[:8]
+
+
 def _summarize_skip_reasons(skipped: List[str]) -> List[Dict[str, Any]]:
     counts: Counter[str] = Counter()
     for item in skipped:
@@ -392,10 +571,16 @@ def _extract_reason_categories(item: str) -> List[str]:
         lowered = reason.lower()
         if "below dynamic minimum" in lowered:
             categories.append("EV below dynamic minimum")
+        elif lowered.startswith("yes price") and "below minimum" in lowered:
+            categories.append("YES price below minimum")
         elif lowered.startswith("spread ") and "exceeds max" in lowered:
             categories.append("spread exceeds max")
         elif "max open positions reached" in lowered:
             categories.append("max open positions reached")
+        elif "higher ranked candidates filled available slots" in lowered:
+            categories.append("higher ranked candidates filled available slots")
+        elif "city/date exposure cap reached" in lowered:
+            categories.append("city/date exposure cap reached")
         elif "historical quote unavailable" in lowered:
             categories.append("historical quote unavailable")
         elif "historical forecast unavailable" in lowered:
@@ -404,6 +589,8 @@ def _extract_reason_categories(item: str) -> List[str]:
             categories.append("Kelly size below 1 contract")
         elif "insufficient backtest cash" in lowered:
             categories.append("insufficient backtest cash")
+        elif "tail-risk penalty" in lowered:
+            categories.append("YES tail-risk penalty applied")
         else:
             categories.append(reason)
     return categories
@@ -453,6 +640,18 @@ def _render_trade_table(items: List[Dict[str, Any]]) -> List[str]:
         f"{_fmt_signed_currency(trade['realized_pnl'])} | {trade['expected_value']:.3f} |"
         for trade in items
     ]
+
+
+def _build_comparison(package: Dict[str, Any], baseline_path: Path) -> Dict[str, Any]:
+    baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+    baseline_summary = baseline.get("summary", baseline.get("backtest", {}))
+    summary = package["summary"]
+    return {
+        "baseline_path": str(Path(baseline_path).resolve()),
+        "total_pnl_delta": float(summary["total_pnl"]) - float(baseline_summary["total_pnl"]),
+        "return_pct_delta": float(summary["return_pct"]) - float(baseline_summary["return_pct"]),
+        "max_drawdown_delta": float(summary["max_drawdown"]) - float(baseline_summary["max_drawdown"]),
+    }
 
 
 def _fmt_currency(value: float) -> str:

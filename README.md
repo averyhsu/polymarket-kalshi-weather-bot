@@ -123,6 +123,14 @@ Important values:
 - `ENABLED_CITIES=nyc,chicago,los_angeles,denver`
 - `BLACKLISTED_CITIES=miami`
 - `NO_ONLY=false`
+- `YES_ENABLED=true`
+- `YES_MIN_EV=0.08`
+- `NO_MIN_EV=0.04`
+- `YES_MIN_PRICE_CENTS=10`
+- `YES_KELLY_FRACTION_MULT=0.35`
+- `MAX_POSITIONS_PER_CITY_DAY=3`
+- `CITY_EV_BUFFER_OVERRIDES={"chicago": 0.02}`
+- `CALIBRATION_ENABLED=true`
 - `MAX_SPREAD_CENTS=5`
 - `BASE_MIN_EV=0.04`
 - `DAILY_MAX_LOSS_PCT=0.10`
@@ -184,6 +192,7 @@ python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
 python main.py --backtest --backtest-days 30 --backtest-refresh-cache
 python main.py --backtest --backtest-days 30 --backtest-raw
 python main.py --backtest --backtest-days 30 --backtest-no-save
+python main.py --backtest --backtest-days 30 --backtest-baseline historical_data/backtests/results/<baseline>.json
 ```
 
 What the backtest does:
@@ -216,6 +225,7 @@ Useful flags:
 
 - `--backtest-raw` prints the full machine-readable backtest package to stdout as JSON
 - `--backtest-no-save` skips writing the JSON and Markdown artifacts for that run
+- `--backtest-baseline <path>` compares the current run against a prior JSON artifact and shows delta vs baseline
 
 This makes it easier to compare model iterations over time:
 
@@ -278,6 +288,21 @@ uncertainty = 0.60 * boundary_mass / 0.25 + 0.40 * disagreement / 0.85
 dynamic_min_ev = base_min_ev + uncertainty * 0.02
 size_mult = max(0.35, 1 - 0.60 * uncertainty)
 ```
+
+The entry layer then applies additional correctness filters:
+
+- side-aware thresholds:
+  - YES and NO use different minimum EV floors
+  - YES can be disabled entirely
+  - very cheap YES contracts are rejected by default
+- city-aware overrides:
+  - cities like Chicago can require extra EV buffer without disabling the whole strategy
+- tail-risk penalty:
+  - cheap YES tail bets with high modeled probability and fragile uncertainty are penalized before entry
+- ranking before execution:
+  - the bot now evaluates all approved candidates in a cycle, ranks them, and only then fills the best ones under the portfolio caps
+- empirical calibration:
+  - raw probabilities are shrunk toward historically realized frequencies by side, price regime, probability bin, and city
 
 The bot also scores source health from:
 

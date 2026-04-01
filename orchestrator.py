@@ -10,7 +10,9 @@ from analytics.calibration import summarize_calibration
 from analytics.pnl import summarize_pnl
 from analytics.replay import replay_from_database, run_historical_backtest, warm_historical_backtest_cache
 from config import Settings
+from core.calibration import CalibrationContext, build_samples_from_calibration_rows
 from core.decision import choose_trade
+from core.entry_selection import select_ranked_candidates
 from core.exits import evaluate_exit
 from core.probability import ProbabilityResult, estimate_bucket_probability
 from core.risk import RiskAssessment, assess_entry_risk
@@ -103,6 +105,21 @@ class WeatherTradingOrchestrator:
             bankroll_reference=self._bankroll_reference(),
         )
         return probability, risk
+
+    def _calibration_context(self) -> Optional[CalibrationContext]:
+        if not self.settings.calibration_enabled:
+            return None
+        samples = build_samples_from_calibration_rows(self.database.recent_calibration_rows())
+        if not samples:
+            return None
+        return CalibrationContext(samples, pseudo_count=self.settings.calibration_pseudo_count)
+
+    def _city_day_counts(self, positions: List[PositionRecord]) -> Dict[Tuple[str, str], int]:
+        counts: Dict[Tuple[str, str], int] = {}
+        for position in positions:
+            key = (position.city_key.lower(), position.target_date)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def _record_market_context(self, market: MarketQuote, forecast: ForecastSnapshot) -> None:
         self.database.record_snapshot(
@@ -215,7 +232,10 @@ class WeatherTradingOrchestrator:
         market_map = {market.ticker: market for market in markets}
         self.manage_open_positions(market_map, summary)
 
-        open_tickers = {position.ticker for position in self.database.fetch_open_positions(mode=self._position_mode())}
+        open_positions = self.database.fetch_open_positions(mode=self._position_mode())
+        open_tickers = {position.ticker for position in open_positions}
+        calibration = self._calibration_context()
+        candidate_entries: List[Dict[str, object]] = []
         for market in markets:
             if market.ticker in open_tickers:
                 continue
@@ -228,9 +248,15 @@ class WeatherTradingOrchestrator:
             probability, risk = self._probability_and_risk(
                 market,
                 forecast,
-                len(self.database.fetch_open_positions(mode=self._position_mode())),
+                len(open_positions),
             )
-            decision = choose_trade(market=market, probability=probability, risk=risk, settings=self.settings)
+            decision = choose_trade(
+                market=market,
+                probability=probability,
+                risk=risk,
+                settings=self.settings,
+                calibration=calibration,
+            )
             self.database.record_calibration(
                 ticker=market.ticker,
                 city_key=market.city_key,
@@ -240,7 +266,13 @@ class WeatherTradingOrchestrator:
                 settled_value=None,
                 bucket_low=market.bucket_low,
                 bucket_high=market.bucket_high,
-                metadata={"decision": decision.rationale},
+                metadata={
+                    "decision": decision.rationale,
+                    "entry_price": decision.price if decision.approved else None,
+                    "ranking_score": decision.ranking_score,
+                    "raw_probability_yes": probability.p_bucket_yes,
+                    "selected": False,
+                },
             )
             if not decision.approved:
                 summary.skipped.append(f"{market.ticker}: {'; '.join(decision.rationale)}")
@@ -255,11 +287,38 @@ class WeatherTradingOrchestrator:
                 uncertainty_mult=risk.size_mult,
                 source_health_mult=risk.source_health_mult,
                 settings=self.settings,
+                side=decision.side,
             )
             if sizing.contracts < 1:
                 summary.skipped.append(f"{market.ticker}: Kelly size below 1 contract")
                 continue
+            candidate_entries.append(
+                {
+                    "ticker": market.ticker,
+                    "city_key": market.city_key,
+                    "target_date": market.target_date.isoformat(),
+                    "market": market,
+                    "probability": probability,
+                    "risk": risk,
+                    "decision": decision,
+                    "sizing": sizing,
+                }
+            )
 
+        selected, rejected = select_ranked_candidates(
+            candidate_entries,
+            remaining_slots=max(self.settings.max_open_positions - len(open_positions), 0),
+            max_positions_per_city_day=self.settings.max_positions_per_city_day,
+            existing_city_day_counts=self._city_day_counts(open_positions),
+        )
+        for candidate, reason in rejected:
+            summary.skipped.append(f"{candidate['ticker']}: {reason}")
+
+        for candidate in selected:
+            market = candidate["market"]
+            probability = candidate["probability"]
+            decision = candidate["decision"]
+            sizing = candidate["sizing"]
             if self.settings.mode == "paper":
                 result = self.paper.place_entry_order(
                     decision=decision,

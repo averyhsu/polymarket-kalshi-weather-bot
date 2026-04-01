@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from config import Settings
+from core.calibration import CalibrationContext, build_samples_from_backtest_trades
 from core.decision import choose_trade
+from core.entry_selection import select_ranked_candidates
 from core.probability import estimate_bucket_probability
 from core.risk import assess_entry_risk
 from core.sizing import calculate_kelly_size
@@ -497,6 +499,7 @@ def run_historical_backtest(
     max_equity = starting_balance
     max_drawdown = 0.0
     daily_summaries: List[Dict[str, object]] = []
+    candidate_diagnostics: List[Dict[str, object]] = []
 
     cycle_start = start_date - timedelta(days=1)
     cycle_end = end_date
@@ -514,9 +517,16 @@ def run_historical_backtest(
             executed_trades.append(settlement)
         open_positions = still_open
 
+        calibration = None
+        if settings.calibration_enabled:
+            settled_samples = build_samples_from_backtest_trades(executed_trades)
+            if settled_samples:
+                calibration = CalibrationContext(settled_samples, pseudo_count=settings.calibration_pseudo_count)
+
         target_date = cycle_day + timedelta(days=1)
         entry_time_utc = _entry_timestamp(cycle_day, entry_hour_utc, entry_minute_utc)
         evaluated_today = 0
+        candidate_entries: List[Dict[str, object]] = []
         for market in markets_by_target.get(target_date, []):
             evaluated_today += 1
             quote = cache.load_quote(market.ticker) if use_cache and not refresh_cache else None
@@ -577,9 +587,35 @@ def run_historical_backtest(
                 realized_pnl_today=realized_today,
                 bankroll_reference=starting_balance,
             )
-            decision = choose_trade(market=quote, probability=probability, risk=risk, settings=settings)
+            decision = choose_trade(
+                market=quote,
+                probability=probability,
+                risk=risk,
+                settings=settings,
+                calibration=calibration,
+            )
+            candidate_record = {
+                "ticker": market.ticker,
+                "city": market.city_key,
+                "target_date": market.target_date.isoformat(),
+                "approved": decision.approved,
+                "selected": False,
+                "side": decision.side,
+                "entry_price": decision.price if decision.approved else None,
+                "expected_value": decision.expected_value,
+                "min_required_ev": decision.min_required_ev,
+                "ranking_score": decision.ranking_score,
+                "raw_probability_yes": probability.p_bucket_yes,
+                "win_probability": decision.win_probability,
+                "spread_cents": quote.spread_cents,
+                "uncertainty": risk.uncertainty,
+                "source_health": forecast.source_health.score,
+                "calibration_sample_size": decision.calibration_sample_size,
+                "rationale": list(decision.rationale),
+            }
             if not decision.approved:
                 skipped.append(f"{market.ticker}: {'; '.join(decision.rationale)}")
+                candidate_diagnostics.append(candidate_record)
                 continue
 
             entries_attempted += 1
@@ -591,14 +627,54 @@ def run_historical_backtest(
                 uncertainty_mult=risk.size_mult,
                 source_health_mult=risk.source_health_mult,
                 settings=settings,
+                side=decision.side,
             )
             if sizing.contracts < 1:
                 skipped.append(f"{market.ticker}: Kelly size below 1 contract")
+                candidate_record["rationale"] = ["Kelly size below 1 contract"]
+                candidate_diagnostics.append(candidate_record)
                 continue
 
+            candidate_entries.append(
+                {
+                    "ticker": market.ticker,
+                    "city_key": market.city_key,
+                    "target_date": market.target_date.isoformat(),
+                    "market": market,
+                    "quote": quote,
+                    "decision": decision,
+                    "sizing": sizing,
+                    "probability": probability,
+                    "diagnostic": candidate_record,
+                }
+            )
+
+        existing_city_day_counts = defaultdict(int)
+        for position in open_positions:
+            existing_city_day_counts[(position.city_key.lower(), position.target_date.isoformat())] += 1
+        selected, rejected = select_ranked_candidates(
+            candidate_entries,
+            remaining_slots=max(settings.max_open_positions - len(open_positions), 0),
+            max_positions_per_city_day=settings.max_positions_per_city_day,
+            existing_city_day_counts=existing_city_day_counts,
+        )
+        for candidate, reason in rejected:
+            skipped.append(f"{candidate['ticker']}: {reason}")
+            diagnostic = dict(candidate["diagnostic"])
+            diagnostic["rationale"] = [reason]
+            candidate_diagnostics.append(diagnostic)
+
+        for candidate in selected:
+            market = candidate["market"]
+            decision = candidate["decision"]
+            sizing = candidate["sizing"]
+            probability = candidate["probability"]
             total_cost = decision.price * sizing.contracts + settings.fee_per_contract * sizing.contracts
             if total_cost > cash:
                 skipped.append(f"{market.ticker}: insufficient backtest cash")
+                diagnostic = dict(candidate["diagnostic"])
+                diagnostic["rationale"] = ["insufficient backtest cash"]
+                candidate_diagnostics.append(diagnostic)
                 continue
 
             entries_executed += 1
@@ -619,6 +695,9 @@ def run_historical_backtest(
                     actual_high_f=market.actual_high_f,
                 )
             )
+            diagnostic = dict(candidate["diagnostic"])
+            diagnostic["selected"] = True
+            candidate_diagnostics.append(diagnostic)
 
         open_cost_basis = sum(
             position.entry_price * position.contracts for position in open_positions
@@ -688,6 +767,7 @@ def run_historical_backtest(
             "by_city": dict(by_city),
             "by_side": dict(by_side),
             "daily": daily_summaries,
+            "candidates": candidate_diagnostics,
             "trades": executed_trades,
             "skipped": skipped,
             "cache_used": use_cache,

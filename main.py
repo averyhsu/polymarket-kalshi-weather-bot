@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backtest-refresh-cache", action="store_true", help="Refetch and overwrite the cached historical dataset")
     parser.add_argument("--backtest-raw", action="store_true", help="Print the full machine-readable backtest package as JSON")
     parser.add_argument("--backtest-no-save", action="store_true", help="Do not save JSON and Markdown artifacts for this backtest run")
+    parser.add_argument("--backtest-baseline", type=str, help="Optional JSON artifact path to compare the run against")
     parser.add_argument("--positions", action="store_true", help="Show open positions")
     parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
     return parser
@@ -118,6 +119,7 @@ def main() -> int:
             ),
             settings,
             save_artifacts=not args.backtest_no_save,
+            baseline_path=None if not args.backtest_baseline else args.backtest_baseline,
         )
         if args.backtest_raw:
             _print_json(result)

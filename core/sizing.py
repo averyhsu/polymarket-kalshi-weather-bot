@@ -30,6 +30,7 @@ def calculate_kelly_size(
     uncertainty_mult: float,
     source_health_mult: float,
     settings: Settings,
+    side: str = "NO",
 ) -> SizingResult:
     """Calculate fee-aware fractional Kelly sizing."""
 
@@ -45,6 +46,8 @@ def calculate_kelly_size(
 
     profile = settings.active_profile
     base_fraction = settings.kelly_fraction * profile.kelly_fraction_mult
+    if side.upper() == "YES":
+        base_fraction *= settings.yes_kelly_fraction_mult
     if balance <= settings.survival_balance_floor:
         base_fraction = settings.survival_kelly_fraction
     adjusted_kelly = max(0.0, raw_kelly * profile.dampening)
@@ -72,5 +75,6 @@ def calculate_kelly_size(
             "base_fraction": base_fraction,
             "uncertainty_mult": uncertainty_mult,
             "source_health_mult": source_health_mult,
+            "side": side.upper(),
         },
     )
