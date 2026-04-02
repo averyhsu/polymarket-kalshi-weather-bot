@@ -294,11 +294,15 @@ Kalshi docs:
 
 ## Computer B Demo Deployment
 
-The recommended deployment is a separate Windows machine, "Computer B", running the current `NO_ONLY=true` / `YES_ENABLED=false` strategy once per UTC day at `20:00`.
+The recommended deployment is a separate Windows machine, "Computer B", using this existing repo path:
 
-### If Computer B already has the repo cloned
+- `C:\Users\avery\Trading\polymarket-kalshi-weather-bot`
 
-If Computer B already has this repo at `C:\Users\avery\Trading\polymarket-kalshi-weather-bot`, use these exact PowerShell commands to update it to the pinned deployment version:
+Computer B should run the current `NO_ONLY=true` / `YES_ENABLED=false` strategy once per UTC day at `20:00`.
+
+### 1. Update the existing clone on Computer B
+
+Use these exact PowerShell commands:
 
 ```powershell
 cd "C:\Users\avery\Trading\polymarket-kalshi-weather-bot"
@@ -316,7 +320,9 @@ mkdir "C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state" -Force
 mkdir "C:\Users\avery\Trading\polymarket-kalshi-weather-bot\logs" -Force
 ```
 
-Then update `C:\Users\avery\Trading\polymarket-kalshi-weather-bot\.env` so it contains:
+### 2. Update Computer B's `.env`
+
+Set `C:\Users\avery\Trading\polymarket-kalshi-weather-bot\.env` to:
 
 ```dotenv
 BOT_MODE=live
@@ -335,7 +341,13 @@ DB_PATH=C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state\trading.db
 HISTORICAL_DATA_DIR=C:\Users\avery\Trading\polymarket-kalshi-weather-bot\historical_data
 ```
 
-Dry-run preflight:
+Put your Kalshi demo private key at:
+
+- `C:\Users\avery\Trading\polymarket-kalshi-weather-bot\secrets\kalshi-demo.pem`
+
+### 3. Run the dry-run preflight
+
+This checks demo auth and runs the strategy without submitting remote orders:
 
 ```powershell
 cd "C:\Users\avery\Trading\polymarket-kalshi-weather-bot"
@@ -343,79 +355,28 @@ cd "C:\Users\avery\Trading\polymarket-kalshi-weather-bot"
 python main.py --mode live --dry-run
 ```
 
-Real demo smoke test:
+### 4. Run one real demo smoke test
+
+This actually places demo-account orders:
 
 ```powershell
 python main.py --mode live
 ```
 
-Register or refresh the Windows scheduled task:
+### 5. Register or refresh the Windows scheduled task
+
+The checked-in runner `scripts\run_live_demo.ps1` is scheduled hourly, but it only actually runs the bot when the current UTC hour is `20`. That avoids daylight-savings mistakes while still preserving the once-per-day strategy behavior.
 
 ```powershell
 schtasks /Create /F /SC HOURLY /MO 1 /TN "KalshiWeatherDemo" /TR "powershell.exe -ExecutionPolicy Bypass -File C:\Users\avery\Trading\polymarket-kalshi-weather-bot\scripts\run_live_demo.ps1" /ST 00:00
 ```
 
-### 1. Clone a pinned repo version on Computer B
+### 6. Useful checks
 
 ```powershell
-mkdir C:\Trading
-cd C:\Trading
-git clone YOUR_REPO_URL weather-prediction
-cd weather-prediction
-git checkout YOUR_DEPLOY_COMMIT_SHA
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-### 2. Create Computer B's `.env`
-
-Create `C:\Trading\weather-prediction\.env`:
-
-```dotenv
-BOT_MODE=live
-BOT_PROFILE=balanced
-DRY_RUN=false
-
-NO_ONLY=true
-YES_ENABLED=false
-
-KALSHI_ENVIRONMENT=demo
-KALSHI_API_KEY_ID=YOUR_DEMO_API_KEY_ID
-KALSHI_PRIVATE_KEY_PATH=C:\Trading\weather-prediction\secrets\kalshi-demo.pem
-
-DB_PATH=C:\Trading\weather-prediction\state\trading.db
-HISTORICAL_DATA_DIR=C:\Trading\weather-prediction\historical_data
-```
-
-Create the supporting folders and copy your Kalshi demo private key into `C:\Trading\weather-prediction\secrets\kalshi-demo.pem`.
-
-### 3. Run the live preflight and a manual smoke test
-
-```powershell
-cd C:\Trading\weather-prediction
-.\.venv\Scripts\Activate.ps1
-python main.py --mode live --dry-run
-python main.py --mode live
-```
-
-### 4. Register the scheduled task
-
-The checked-in runner [scripts/run_live_demo.ps1](C:\Users\avery\OneDrive - andrew.cmu.edu\Projects\weather prediction\scripts\run_live_demo.ps1) can safely be scheduled **hourly**. It only executes the bot when the current UTC hour is `20`, and it records the last successful UTC run date so Computer B does not double-submit.
-
-Create the task on Computer B:
-
-```powershell
-schtasks /Create /F /SC HOURLY /MO 1 /TN "KalshiWeatherDemo" /TR "powershell.exe -ExecutionPolicy Bypass -File C:\Trading\weather-prediction\scripts\run_live_demo.ps1" /ST 00:00
-```
-
-Useful checks:
-
-```powershell
-Get-Content C:\Trading\weather-prediction\logs\live-demo.log -Tail 100
-sqlite3 C:\Trading\weather-prediction\state\trading.db ".tables"
-sqlite3 C:\Trading\weather-prediction\state\trading.db "select count(*) from orders;"
+Get-Content C:\Users\avery\Trading\polymarket-kalshi-weather-bot\logs\live-demo.log -Tail 100
+sqlite3 C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state\trading.db ".tables"
+sqlite3 C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state\trading.db "select count(*) from orders;"
 ```
 
 ## Strategy Logic Summary
