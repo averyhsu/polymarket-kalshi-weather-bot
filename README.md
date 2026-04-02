@@ -12,14 +12,30 @@ Each CLI invocation runs one cycle. This repo does not run continuously unless y
 
 ## Project Overview
 
-The bot trades day-ahead daily high-temperature contracts for:
+The bot supports all currently wired Kalshi daily high-temperature cities:
 
-- `nyc`
+- `atlanta`
+- `austin`
+- `boston`
 - `chicago`
-- `los_angeles`
+- `dallas`
 - `denver`
+- `houston`
+- `las_vegas`
+- `los_angeles`
+- `miami`
+- `minneapolis`
+- `new_orleans`
+- `nyc`
+- `oklahoma_city`
+- `philadelphia`
+- `phoenix`
+- `san_antonio`
+- `san_francisco`
+- `seattle`
+- `washington_dc`
 
-Miami is blacklisted by default because of the strategy’s settlement-risk and regime-noise concerns, but it can be re-enabled in config.
+The default config now enables all of the cities above so broader backtests do not silently stay narrowed to the old four-city subset.
 
 The execution flow is:
 
@@ -120,16 +136,22 @@ Important values:
 - `BOT_PROFILE=conservative|balanced|aggressive`
 - `DB_PATH=kalshi_weather_bot.sqlite3`
 - `HISTORICAL_DATA_DIR=historical_data/backtests`
-- `ENABLED_CITIES=nyc,chicago,los_angeles,denver`
-- `BLACKLISTED_CITIES=miami`
+- `ENABLED_CITIES=atlanta,austin,boston,chicago,dallas,denver,houston,las_vegas,los_angeles,miami,minneapolis,new_orleans,nyc,oklahoma_city,philadelphia,phoenix,san_antonio,san_francisco,seattle,washington_dc`
+- `BLACKLISTED_CITIES=`
 - `NO_ONLY=false`
 - `YES_ENABLED=true`
 - `YES_MIN_EV=0.08`
 - `NO_MIN_EV=0.04`
 - `YES_MIN_PRICE_CENTS=10`
+- `NO_MID_PRICE_FILTER_ENABLED=true`
+- `NO_MID_PRICE_MIN_CENTS=10`
+- `NO_MID_PRICE_MAX_CENTS=50`
 - `YES_KELLY_FRACTION_MULT=0.35`
 - `MAX_POSITIONS_PER_CITY_DAY=3`
-- `CITY_EV_BUFFER_OVERRIDES={"chicago": 0.02}`
+- `MAX_YES_POSITIONS_PER_CITY_DAY=1`
+- `ALLOW_MIXED_SIDES_PER_CITY_DAY=false`
+- `EVENT_WORST_CASE_PENALTY=0.35`
+- `CITY_EV_BUFFER_OVERRIDES={"chicago": 0.06}`
 - `CALIBRATION_ENABLED=true`
 - `MAX_SPREAD_CENTS=5`
 - `BASE_MIN_EV=0.04`
@@ -174,7 +196,9 @@ python main.py --stats
 python main.py --positions
 python main.py --replay
 python main.py --warm-backtest-cache --backtest-days 30
+python main.py --warm-backtest-cache --backtest-max-range
 python main.py --backtest --backtest-days 14
+python main.py --backtest --backtest-max-range
 python main.py --close-all-paper
 ```
 
@@ -186,7 +210,9 @@ Run a historical day-ahead backtest over settled markets:
 
 ```bash
 python main.py --warm-backtest-cache --backtest-days 30
+python main.py --warm-backtest-cache --backtest-max-range
 python main.py --backtest --backtest-days 14
+python main.py --backtest --backtest-max-range
 python main.py --backtest --backtest-start 2026-03-01 --backtest-end 2026-03-31
 python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
 python main.py --backtest --backtest-days 30 --backtest-refresh-cache
@@ -208,6 +234,7 @@ What the backtest does:
 Recommended workflow:
 
 - run `python main.py --warm-backtest-cache --backtest-days 30` once to download the last month of backtest inputs
+- run `python main.py --warm-backtest-cache --backtest-max-range` when you want the full currently supported historical window in one shot
 - then run `python main.py --backtest --backtest-days 14` or any overlapping range and it will reuse the local cache
 - use `--backtest-refresh-cache` when you want to overwrite the saved dataset
 - use `--backtest-no-cache` if you explicitly want a one-off uncached run
@@ -226,6 +253,7 @@ Useful flags:
 - `--backtest-raw` prints the full machine-readable backtest package to stdout as JSON
 - `--backtest-no-save` skips writing the JSON and Markdown artifacts for that run
 - `--backtest-baseline <path>` compares the current run against a prior JSON artifact and shows delta vs baseline
+- `--backtest-max-range` uses the earliest fully reconstructable historical date through yesterday
 
 This makes it easier to compare model iterations over time:
 
@@ -295,12 +323,17 @@ The entry layer then applies additional correctness filters:
   - YES and NO use different minimum EV floors
   - YES can be disabled entirely
   - very cheap YES contracts are rejected by default
+  - mid-priced NO contracts can be filtered out when that regime is underperforming
 - city-aware overrides:
   - cities like Chicago can require extra EV buffer without disabling the whole strategy
 - tail-risk penalty:
   - cheap YES tail bets with high modeled probability and fragile uncertainty are penalized before entry
 - ranking before execution:
   - the bot now evaluates all approved candidates in a cycle, ranks them, and only then fills the best ones under the portfolio caps
+- event-basket selection:
+  - selection is optimized at the city/day basket level instead of treating overlapping buckets as independent trades
+  - by default the bot allows at most one YES per city/day and avoids mixing YES and NO on the same event
+  - event baskets are penalized for ugly worst-case outcomes before they compete for the global slot budget
 - empirical calibration:
   - raw probabilities are shrunk toward historically realized frequencies by side, price regime, probability bin, and city
 

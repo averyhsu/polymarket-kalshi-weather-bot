@@ -310,6 +310,11 @@ class WeatherTradingOrchestrator:
             remaining_slots=max(self.settings.max_open_positions - len(open_positions), 0),
             max_positions_per_city_day=self.settings.max_positions_per_city_day,
             existing_city_day_counts=self._city_day_counts(open_positions),
+            fee_per_contract=self.settings.fee_per_contract,
+            slippage_per_contract=self.settings.slippage_per_contract,
+            max_yes_positions_per_city_day=self.settings.max_yes_positions_per_city_day,
+            allow_mixed_sides_per_city_day=self.settings.allow_mixed_sides_per_city_day,
+            event_worst_case_penalty=self.settings.event_worst_case_penalty,
         )
         for candidate, reason in rejected:
             summary.skipped.append(f"{candidate['ticker']}: {reason}")

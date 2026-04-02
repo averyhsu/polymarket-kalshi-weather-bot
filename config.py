@@ -16,6 +16,28 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "kalshi_weather_bot.sqlite3"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / ".cache"
 DEFAULT_HISTORICAL_DATA_DIR = PROJECT_ROOT / "historical_data" / "backtests"
 DEFAULT_USER_AGENT = "kalshi-weather-bot/1.0 (https://github.com/averyhsu/polymarket-kalshi-weather-bot)"
+DEFAULT_ENABLED_CITIES = [
+    "atlanta",
+    "austin",
+    "boston",
+    "chicago",
+    "dallas",
+    "denver",
+    "houston",
+    "las_vegas",
+    "los_angeles",
+    "miami",
+    "minneapolis",
+    "new_orleans",
+    "nyc",
+    "oklahoma_city",
+    "philadelphia",
+    "phoenix",
+    "san_antonio",
+    "san_francisco",
+    "seattle",
+    "washington_dc",
+]
 
 
 def _parse_csv(value: object) -> List[str]:
@@ -131,11 +153,11 @@ class Settings(BaseSettings):
     )
 
     enabled_cities: Annotated[List[str], NoDecode] = Field(
-        default_factory=lambda: ["nyc", "chicago", "los_angeles", "denver"],
+        default_factory=lambda: list(DEFAULT_ENABLED_CITIES),
         alias="ENABLED_CITIES",
     )
     blacklisted_cities: Annotated[List[str], NoDecode] = Field(
-        default_factory=lambda: ["miami"],
+        default_factory=list,
         alias="BLACKLISTED_CITIES",
     )
     no_only: bool = Field(default=False, alias="NO_ONLY")
@@ -163,10 +185,16 @@ class Settings(BaseSettings):
     min_price_cents: int = Field(default=2, alias="MIN_PRICE_CENTS")
     max_price_cents: int = Field(default=98, alias="MAX_PRICE_CENTS")
     yes_min_price_cents: int = Field(default=10, alias="YES_MIN_PRICE_CENTS")
+    no_mid_price_filter_enabled: bool = Field(default=True, alias="NO_MID_PRICE_FILTER_ENABLED")
+    no_mid_price_min_cents: int = Field(default=10, alias="NO_MID_PRICE_MIN_CENTS")
+    no_mid_price_max_cents: int = Field(default=50, alias="NO_MID_PRICE_MAX_CENTS")
     yes_kelly_fraction_mult: float = Field(default=0.35, alias="YES_KELLY_FRACTION_MULT")
     max_positions_per_city_day: int = Field(default=3, alias="MAX_POSITIONS_PER_CITY_DAY")
+    max_yes_positions_per_city_day: int = Field(default=1, alias="MAX_YES_POSITIONS_PER_CITY_DAY")
+    allow_mixed_sides_per_city_day: bool = Field(default=False, alias="ALLOW_MIXED_SIDES_PER_CITY_DAY")
+    event_worst_case_penalty: float = Field(default=0.35, alias="EVENT_WORST_CASE_PENALTY")
     city_ev_buffer_overrides: Annotated[Dict[str, float], NoDecode] = Field(
-        default_factory=lambda: {"chicago": 0.02},
+        default_factory=lambda: {"chicago": 0.06},
         alias="CITY_EV_BUFFER_OVERRIDES",
     )
     city_enabled_overrides: Annotated[Dict[str, bool], NoDecode] = Field(

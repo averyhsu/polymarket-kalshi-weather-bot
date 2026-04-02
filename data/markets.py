@@ -20,6 +20,8 @@ from data.weather import CITY_CONFIG
 
 
 logger = logging.getLogger(__name__)
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+EARLIEST_RECONSTRUCTABLE_MARKET_DATE = date(2025, 12, 23)
 
 MONTH_ABBR = {
     "JAN": 1,
@@ -101,6 +103,12 @@ class HistoricalMarketDefinition:
     volume: float
     open_interest: float
     use_historical_api: bool = False
+
+
+def earliest_reconstructable_market_date() -> date:
+    """Return the earliest verified target date with reconstructable Kalshi bucket history."""
+
+    return EARLIEST_RECONSTRUCTABLE_MARKET_DATE
 
 
 def _serialize_datetime(value: Optional[datetime]) -> Optional[str]:
@@ -215,10 +223,24 @@ class KalshiClient:
         if self.settings.kalshi_credentials_present:
             api_path = f"/trade-api/v2{path}"
             headers.update(self._headers("GET", api_path))
+        attempts = 4
         with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
-            response = client.get(f"{self.settings.kalshi_api_base_url}{path}", params=params)
-            response.raise_for_status()
-            return response.json()
+            for attempt in range(1, attempts + 1):
+                response = client.get(f"{self.settings.kalshi_api_base_url}{path}", params=params)
+                if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts:
+                    response.raise_for_status()
+                    return response.json()
+                sleep_seconds = min(8.0, 1.5 * attempt)
+                logger.warning(
+                    "Kalshi GET %s returned %s on attempt %d/%d; retrying in %.1fs",
+                    path,
+                    response.status_code,
+                    attempt,
+                    attempts,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+        raise RuntimeError(f"unreachable GET retry loop for {path}")
 
     def post(self, path: str, json_payload: Dict[str, Any]) -> Dict[str, Any]:
         api_path = f"/trade-api/v2{path}"
@@ -248,15 +270,37 @@ class KalshiClient:
         path = "/historical/markets" if historical else "/markets"
         return self.get(path, params=params)
 
+    def list_events(
+        self,
+        series_ticker: str,
+        cursor: Optional[str] = None,
+        *,
+        status: str = "open",
+        with_nested_markets: bool = False,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "series_ticker": series_ticker,
+            "status": status,
+            "limit": int(limit),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        if with_nested_markets:
+            params["with_nested_markets"] = "true"
+        return self.get("/events", params=params)
+
     def get_historical_cutoff(self) -> Optional[datetime]:
         payload = self.get("/historical/cutoff")
-        raw = payload.get("historical_cutoff_ts")
+        raw = payload.get("historical_cutoff_ts") or payload.get("market_settled_ts")
         if raw is None:
             return None
         try:
+            if isinstance(raw, str) and "T" in raw:
+                return _parse_datetime(raw)
             return datetime.fromtimestamp(int(raw), tz=timezone.utc)
-        except (TypeError, ValueError, OSError):
-            return None
+        except (TypeError, ValueError, OSError, OverflowError):
+            return _parse_datetime(str(raw))
 
     def get_market_candlesticks(
         self,
@@ -550,66 +594,55 @@ def fetch_historical_market_definitions(
         raise ValueError("end_date must be on or after start_date")
 
     client = KalshiClient(settings)
-    cutoff = None
-    try:
-        cutoff = client.get_historical_cutoff()
-    except httpx.HTTPError:
-        cutoff = None
-
-    min_settled = int(datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
-    max_settled = int(datetime.combine(end_date + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc).timestamp())
-
-    recent_start = min_settled
-    recent_end = max_settled
-    historical_start = None
-    historical_end = None
-    if cutoff is not None:
-        cutoff_ts = int(cutoff.timestamp())
-        if min_settled < cutoff_ts:
-            historical_start = min_settled
-            historical_end = min(max_settled, cutoff_ts)
-            recent_start = max(min_settled, cutoff_ts)
-        if max_settled <= cutoff_ts:
-            recent_start = recent_end = None
-
     all_markets: Dict[str, HistoricalMarketDefinition] = {}
     for city_key in settings.tradable_cities:
         city = CITY_CONFIG.get(city_key)
         if city is None:
             continue
         series_ticker = str(city["kalshi_series"])
-        query_ranges = [
-            (False, recent_start, recent_end),
-            (True, historical_start, historical_end),
-        ]
-        for historical, range_start, range_end in query_ranges:
-            if range_start is None or range_end is None or range_start >= range_end:
-                continue
-            cursor: Optional[str] = None
-            while True:
-                try:
-                    payload = client.list_markets(
-                        series_ticker,
-                        cursor=cursor,
-                        status="settled",
-                        min_settled_ts=range_start,
-                        max_settled_ts=range_end,
-                        historical=historical,
-                    )
-                except httpx.HTTPError as exc:
-                    logger.warning("Kalshi historical market request failed for %s: %s", series_ticker, exc)
-                    break
-                raw_markets = payload.get("markets", [])
-                for raw_market in raw_markets:
-                    market = _normalize_historical_market(raw_market, city_key, use_historical_api=historical)
+        cursor: Optional[str] = None
+        while True:
+            try:
+                payload = client.list_events(
+                    series_ticker,
+                    cursor=cursor,
+                    status="settled",
+                    with_nested_markets=True,
+                )
+            except httpx.HTTPError as exc:
+                logger.warning("Kalshi settled event request failed for %s: %s", series_ticker, exc)
+                break
+            raw_events = payload.get("events", [])
+            if not raw_events:
+                break
+
+            oldest_event_date: Optional[date] = None
+            for raw_event in raw_events:
+                event_date = None
+                strike_date = raw_event.get("strike_date")
+                if strike_date:
+                    try:
+                        event_date = date.fromisoformat(str(strike_date))
+                    except ValueError:
+                        event_date = None
+                if event_date is None:
+                    event_date = _parse_date_from_ticker(str(raw_event.get("event_ticker", "")))
+                if event_date is not None:
+                    oldest_event_date = event_date if oldest_event_date is None else min(oldest_event_date, event_date)
+
+                for raw_market in raw_event.get("markets", []):
+                    market = _normalize_historical_market(raw_market, city_key, use_historical_api=False)
                     if market is None:
                         continue
                     if not (start_date <= market.target_date <= end_date):
                         continue
                     all_markets[market.ticker] = market
-                cursor = payload.get("cursor")
-                if not cursor or not raw_markets:
-                    break
+
+            if oldest_event_date is not None and oldest_event_date < start_date:
+                break
+            cursor = payload.get("cursor")
+            if not cursor:
+                break
     return sorted(all_markets.values(), key=lambda item: (item.target_date, item.city_key, item.ticker))
 
 

@@ -56,7 +56,13 @@ class EntrySignalTests(unittest.TestCase):
         self.assertIn("YES price 5c below minimum 10c", decision.rationale[0])
 
     def test_yes_requires_higher_ev_than_no(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        settings = load_settings(
+            {
+                "cache_dir": ".cache",
+                "db_path": "test.sqlite3",
+                "no_mid_price_filter_enabled": False,
+            }
+        )
         market = MarketQuote(
             **{
                 **self.market.__dict__,
@@ -71,6 +77,23 @@ class EntrySignalTests(unittest.TestCase):
         decision = choose_trade(market=market, probability=probability, risk=self.risk, settings=settings)
         self.assertTrue(decision.approved)
         self.assertEqual(decision.side, "NO")
+
+    def test_mid_priced_no_gets_rejected_under_filter(self) -> None:
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        market = MarketQuote(
+            **{
+                **self.market.__dict__,
+                "yes_bid": 0.59,
+                "yes_ask": 0.62,
+                "no_bid": 0.34,
+                "no_ask": 0.38,
+                "last_price": 0.62,
+            }
+        )
+        probability = ProbabilityResult(0.25, 0.75, 0.05, 0.10, {})
+        decision = choose_trade(market=market, probability=probability, risk=self.risk, settings=settings)
+        self.assertFalse(decision.approved)
+        self.assertIn("filtered mid-price range", decision.rationale[0])
 
     def test_city_override_can_reject_otherwise_valid_entry(self) -> None:
         settings = load_settings(
@@ -152,6 +175,143 @@ class EntrySignalTests(unittest.TestCase):
         )
         self.assertEqual([item["ticker"] for item in selected], ["high", "mid"])
         self.assertEqual(rejected[0][0]["ticker"], "low")
+
+    def test_event_basket_selection_avoids_mixed_side_cluster(self) -> None:
+        def event_candidate(
+            ticker: str,
+            *,
+            side: str,
+            price: float,
+            bucket_low: float,
+            bucket_high: float,
+            probability_yes: float,
+            contracts: int,
+            ranking_score: float,
+            expected_value: float,
+        ) -> dict:
+            market = MarketQuote(
+                **{
+                    **self.market.__dict__,
+                    "ticker": ticker,
+                    "bucket_low": bucket_low,
+                    "bucket_high": bucket_high,
+                    "yes_bid": max(price - 0.02, 0.01),
+                    "yes_ask": price if side == "YES" else 0.40,
+                    "no_bid": 0.58 if side == "NO" else max(1.0 - price - 0.03, 0.01),
+                    "no_ask": price if side == "NO" else max(1.0 - price, 0.01),
+                    "last_price": price,
+                }
+            )
+            return {
+                "ticker": ticker,
+                "city_key": "nyc",
+                "target_date": "2026-04-01",
+                "market": market,
+                "decision": SimpleNamespace(
+                    side=side,
+                    price=price,
+                    ranking_score=ranking_score,
+                    expected_value=expected_value,
+                ),
+                "sizing": SimpleNamespace(contracts=contracts),
+                "probability": ProbabilityResult(probability_yes, 1.0 - probability_yes, 0.05, 0.10, {}),
+            }
+
+        candidates = [
+            event_candidate(
+                "yes-tail",
+                side="YES",
+                price=0.21,
+                bucket_low=float("-inf"),
+                bucket_high=46.5,
+                probability_yes=0.60,
+                contracts=7,
+                ranking_score=0.80,
+                expected_value=0.30,
+            ),
+            event_candidate(
+                "no-mid-a",
+                side="NO",
+                price=0.74,
+                bucket_low=46.5,
+                bucket_high=48.5,
+                probability_yes=0.08,
+                contracts=2,
+                ranking_score=0.35,
+                expected_value=0.12,
+            ),
+            event_candidate(
+                "no-mid-b",
+                side="NO",
+                price=0.72,
+                bucket_low=48.5,
+                bucket_high=50.5,
+                probability_yes=0.10,
+                contracts=2,
+                ranking_score=0.34,
+                expected_value=0.11,
+            ),
+        ]
+
+        selected, rejected = select_ranked_candidates(
+            candidates,
+            remaining_slots=3,
+            max_positions_per_city_day=3,
+            fee_per_contract=0.01,
+            slippage_per_contract=0.005,
+            max_yes_positions_per_city_day=1,
+            allow_mixed_sides_per_city_day=False,
+            event_worst_case_penalty=0.35,
+        )
+        self.assertTrue(selected)
+        self.assertEqual(len({item["decision"].side for item in selected}), 1)
+        self.assertLess(len(selected), 3)
+        self.assertTrue(any("different bundle" in reason for _, reason in rejected))
+
+    def test_event_basket_selection_limits_yes_to_one_per_city_day(self) -> None:
+        def yes_candidate(ticker: str, price: float, probability_yes: float, ranking_score: float) -> dict:
+            market = MarketQuote(
+                **{
+                    **self.market.__dict__,
+                    "ticker": ticker,
+                    "yes_bid": max(price - 0.01, 0.01),
+                    "yes_ask": price,
+                    "no_bid": max(1.0 - price - 0.02, 0.01),
+                    "no_ask": max(1.0 - price, 0.01),
+                    "last_price": price,
+                }
+            )
+            return {
+                "ticker": ticker,
+                "city_key": "nyc",
+                "target_date": "2026-04-01",
+                "market": market,
+                "decision": SimpleNamespace(
+                    side="YES",
+                    price=price,
+                    ranking_score=ranking_score,
+                    expected_value=0.20,
+                ),
+                "sizing": SimpleNamespace(contracts=4),
+                "probability": ProbabilityResult(probability_yes, 1.0 - probability_yes, 0.05, 0.10, {}),
+            }
+
+        selected, rejected = select_ranked_candidates(
+            [
+                yes_candidate("yes-a", 0.28, 0.55, 0.40),
+                yes_candidate("yes-b", 0.24, 0.58, 0.45),
+            ],
+            remaining_slots=3,
+            max_positions_per_city_day=3,
+            fee_per_contract=0.01,
+            slippage_per_contract=0.005,
+            max_yes_positions_per_city_day=1,
+            allow_mixed_sides_per_city_day=False,
+            event_worst_case_penalty=0.35,
+        )
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["ticker"], "yes-b")
+        self.assertEqual(rejected[0][0]["ticker"], "yes-a")
 
     def test_calibration_context_adjusts_probability_and_stays_bounded(self) -> None:
         samples = [

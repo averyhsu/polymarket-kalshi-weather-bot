@@ -10,6 +10,8 @@ from typing import Any, Dict
 
 from analytics.backtest_reporting import build_backtest_result_package, render_backtest_terminal_report
 from config import load_settings
+from data.markets import earliest_reconstructable_market_date
+from data.weather import earliest_historical_forecast_date
 from orchestrator import WeatherTradingOrchestrator
 
 
@@ -29,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backtest-start", type=str, help="Inclusive target-date start for backtests (YYYY-MM-DD)")
     parser.add_argument("--backtest-end", type=str, help="Inclusive target-date end for backtests (YYYY-MM-DD)")
     parser.add_argument("--backtest-days", type=int, help="Shortcut for a recent backtest window ending yesterday")
+    parser.add_argument("--backtest-max-range", action="store_true", help="Use the earliest fully reconstructable historical date through yesterday")
     parser.add_argument("--backtest-entry-hour-utc", type=int, default=20, help="Entry hour in UTC for backtests")
     parser.add_argument("--backtest-entry-minute-utc", type=int, default=0, help="Entry minute in UTC for backtests")
     parser.add_argument("--backtest-no-cache", action="store_true", help="Ignore the local historical cache for this run")
@@ -62,6 +65,15 @@ def _parse_iso_date(raw_value: str) -> date:
 
 
 def _resolve_backtest_window(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[date, date]:
+    if args.backtest_max_range:
+        if args.backtest_days or args.backtest_start or args.backtest_end:
+            parser.error("--backtest-max-range cannot be combined with --backtest-days or explicit start/end dates")
+        end_date = date.today() - timedelta(days=1)
+        start_date = max(
+            earliest_historical_forecast_date(),
+            earliest_reconstructable_market_date(),
+        )
+        return start_date, end_date
     if args.backtest_days:
         end_date = date.today() - timedelta(days=1)
         start_date = end_date - timedelta(days=max(args.backtest_days - 1, 0))

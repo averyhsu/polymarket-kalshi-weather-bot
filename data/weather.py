@@ -23,15 +23,30 @@ SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 NWS_OBSERVATION_URL = "https://api.weather.gov/stations/{station}/observations"
 EXPECTED_ENSEMBLE_MEMBERS = 31
 EXPECTED_HISTORICAL_RUNS = 4
+EARLIEST_HISTORICAL_FORECAST_DATE = date(2025, 7, 28)
 
 
 CITY_CONFIG: Dict[str, Dict[str, object]] = {
-    "nyc": {
-        "name": "New York City",
-        "kalshi_series": "KXHIGHNY",
-        "lat": 40.7128,
-        "lon": -74.0060,
-        "nws_station": "KNYC",
+    "atlanta": {
+        "name": "Atlanta",
+        "kalshi_series": "KXHIGHTATL",
+        "lat": 33.7490,
+        "lon": -84.3880,
+        "nws_station": "KATL",
+    },
+    "austin": {
+        "name": "Austin",
+        "kalshi_series": "KXHIGHAUS",
+        "lat": 30.2672,
+        "lon": -97.7431,
+        "nws_station": "KAUS",
+    },
+    "boston": {
+        "name": "Boston",
+        "kalshi_series": "KXHIGHTBOS",
+        "lat": 42.3601,
+        "lon": -71.0589,
+        "nws_station": "KBOS",
     },
     "chicago": {
         "name": "Chicago",
@@ -40,12 +55,33 @@ CITY_CONFIG: Dict[str, Dict[str, object]] = {
         "lon": -87.6298,
         "nws_station": "KORD",
     },
-    "miami": {
-        "name": "Miami",
-        "kalshi_series": "KXHIGHMIA",
-        "lat": 25.7617,
-        "lon": -80.1918,
-        "nws_station": "KMIA",
+    "dallas": {
+        "name": "Dallas",
+        "kalshi_series": "KXHIGHTDAL",
+        "lat": 32.7767,
+        "lon": -96.7970,
+        "nws_station": "KDAL",
+    },
+    "denver": {
+        "name": "Denver",
+        "kalshi_series": "KXHIGHDEN",
+        "lat": 39.7392,
+        "lon": -104.9903,
+        "nws_station": "KDEN",
+    },
+    "houston": {
+        "name": "Houston",
+        "kalshi_series": "KXHIGHHOU",
+        "lat": 29.7604,
+        "lon": -95.3698,
+        "nws_station": "KIAH",
+    },
+    "las_vegas": {
+        "name": "Las Vegas",
+        "kalshi_series": "KXHIGHTLV",
+        "lat": 36.1699,
+        "lon": -115.1398,
+        "nws_station": "KLAS",
     },
     "los_angeles": {
         "name": "Los Angeles",
@@ -54,12 +90,82 @@ CITY_CONFIG: Dict[str, Dict[str, object]] = {
         "lon": -118.2437,
         "nws_station": "KLAX",
     },
-    "denver": {
-        "name": "Denver",
-        "kalshi_series": "KXHIGHDEN",
-        "lat": 39.7392,
-        "lon": -104.9903,
-        "nws_station": "KDEN",
+    "miami": {
+        "name": "Miami",
+        "kalshi_series": "KXHIGHMIA",
+        "lat": 25.7617,
+        "lon": -80.1918,
+        "nws_station": "KMIA",
+    },
+    "minneapolis": {
+        "name": "Minneapolis",
+        "kalshi_series": "KXHIGHTMIN",
+        "lat": 44.9778,
+        "lon": -93.2650,
+        "nws_station": "KMSP",
+    },
+    "new_orleans": {
+        "name": "New Orleans",
+        "kalshi_series": "KXHIGHTNOLA",
+        "lat": 29.9511,
+        "lon": -90.0715,
+        "nws_station": "KMSY",
+    },
+    "nyc": {
+        "name": "New York City",
+        "kalshi_series": "KXHIGHNY",
+        "lat": 40.7128,
+        "lon": -74.0060,
+        "nws_station": "KNYC",
+    },
+    "oklahoma_city": {
+        "name": "Oklahoma City",
+        "kalshi_series": "KXHIGHTOKC",
+        "lat": 35.4676,
+        "lon": -97.5164,
+        "nws_station": "KOKC",
+    },
+    "philadelphia": {
+        "name": "Philadelphia",
+        "kalshi_series": "KXHIGHPHIL",
+        "lat": 39.9526,
+        "lon": -75.1652,
+        "nws_station": "KPHL",
+    },
+    "phoenix": {
+        "name": "Phoenix",
+        "kalshi_series": "KXHIGHTPHX",
+        "lat": 33.4484,
+        "lon": -112.0740,
+        "nws_station": "KPHX",
+    },
+    "san_antonio": {
+        "name": "San Antonio",
+        "kalshi_series": "KXHIGHTSATX",
+        "lat": 29.4241,
+        "lon": -98.4936,
+        "nws_station": "KSAT",
+    },
+    "san_francisco": {
+        "name": "San Francisco",
+        "kalshi_series": "KXHIGHTSFO",
+        "lat": 37.7749,
+        "lon": -122.4194,
+        "nws_station": "KSFO",
+    },
+    "seattle": {
+        "name": "Seattle",
+        "kalshi_series": "KXHIGHTSEA",
+        "lat": 47.6062,
+        "lon": -122.3321,
+        "nws_station": "KSEA",
+    },
+    "washington_dc": {
+        "name": "Washington, DC",
+        "kalshi_series": "KXHIGHTDC",
+        "lat": 38.9072,
+        "lon": -77.0369,
+        "nws_station": "KDCA",
     },
 }
 
@@ -95,6 +201,12 @@ class ForecastSnapshot:
     @property
     def member_count(self) -> int:
         return len(self.member_highs)
+
+
+def earliest_historical_forecast_date() -> date:
+    """Return the earliest verified date with usable archived forecast coverage."""
+
+    return EARLIEST_HISTORICAL_FORECAST_DATE
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:

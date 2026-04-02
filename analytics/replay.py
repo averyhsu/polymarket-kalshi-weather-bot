@@ -657,6 +657,11 @@ def run_historical_backtest(
             remaining_slots=max(settings.max_open_positions - len(open_positions), 0),
             max_positions_per_city_day=settings.max_positions_per_city_day,
             existing_city_day_counts=existing_city_day_counts,
+            fee_per_contract=settings.fee_per_contract,
+            slippage_per_contract=settings.slippage_per_contract,
+            max_yes_positions_per_city_day=settings.max_yes_positions_per_city_day,
+            allow_mixed_sides_per_city_day=settings.allow_mixed_sides_per_city_day,
+            event_worst_case_penalty=settings.event_worst_case_penalty,
         )
         for candidate, reason in rejected:
             skipped.append(f"{candidate['ticker']}: {reason}")

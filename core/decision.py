@@ -77,6 +77,15 @@ def choose_trade(
             candidate_rationale.append(f"{side} price {price_cents}c outside allowed range")
         if side == "YES" and price_cents < settings.yes_min_price_cents:
             candidate_rationale.append(f"YES price {price_cents}c below minimum {settings.yes_min_price_cents}c")
+        if (
+            side == "NO"
+            and settings.no_mid_price_filter_enabled
+            and settings.no_mid_price_min_cents <= price_cents < settings.no_mid_price_max_cents
+        ):
+            candidate_rationale.append(
+                f"NO price {price_cents}c inside filtered mid-price range "
+                f"{settings.no_mid_price_min_cents}c-{settings.no_mid_price_max_cents - 1}c"
+            )
 
         calibration_adjustment = (
             calibration.calibrate(side=side, city_key=market.city_key, price=price, raw_probability=raw_probability)
