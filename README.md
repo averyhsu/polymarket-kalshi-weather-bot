@@ -296,6 +296,65 @@ Kalshi docs:
 
 The recommended deployment is a separate Windows machine, "Computer B", running the current `NO_ONLY=true` / `YES_ENABLED=false` strategy once per UTC day at `20:00`.
 
+### If Computer B already has the repo cloned
+
+If Computer B already has this repo at `C:\Users\avery\Trading\polymarket-kalshi-weather-bot`, use these exact PowerShell commands to update it to the pinned deployment version:
+
+```powershell
+cd "C:\Users\avery\Trading\polymarket-kalshi-weather-bot"
+git fetch origin
+git checkout feat-kalshi-weather-bot
+git pull origin feat-kalshi-weather-bot
+git checkout 6b81349
+
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+mkdir "C:\Users\avery\Trading\polymarket-kalshi-weather-bot\secrets" -Force
+mkdir "C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state" -Force
+mkdir "C:\Users\avery\Trading\polymarket-kalshi-weather-bot\logs" -Force
+```
+
+Then update `C:\Users\avery\Trading\polymarket-kalshi-weather-bot\.env` so it contains:
+
+```dotenv
+BOT_MODE=live
+BOT_PROFILE=balanced
+DRY_RUN=false
+VERBOSE=false
+
+NO_ONLY=true
+YES_ENABLED=false
+
+KALSHI_ENVIRONMENT=demo
+KALSHI_API_KEY_ID=YOUR_DEMO_API_KEY_ID
+KALSHI_PRIVATE_KEY_PATH=C:\Users\avery\Trading\polymarket-kalshi-weather-bot\secrets\kalshi-demo.pem
+
+DB_PATH=C:\Users\avery\Trading\polymarket-kalshi-weather-bot\state\trading.db
+HISTORICAL_DATA_DIR=C:\Users\avery\Trading\polymarket-kalshi-weather-bot\historical_data
+```
+
+Dry-run preflight:
+
+```powershell
+cd "C:\Users\avery\Trading\polymarket-kalshi-weather-bot"
+.\.venv\Scripts\Activate.ps1
+python main.py --mode live --dry-run
+```
+
+Real demo smoke test:
+
+```powershell
+python main.py --mode live
+```
+
+Register or refresh the Windows scheduled task:
+
+```powershell
+schtasks /Create /F /SC HOURLY /MO 1 /TN "KalshiWeatherDemo" /TR "powershell.exe -ExecutionPolicy Bypass -File C:\Users\avery\Trading\polymarket-kalshi-weather-bot\scripts\run_live_demo.ps1" /ST 00:00
+```
+
 ### 1. Clone a pinned repo version on Computer B
 
 ```powershell
