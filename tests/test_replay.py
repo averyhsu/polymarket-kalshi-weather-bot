@@ -20,6 +20,8 @@ def _settings(cache_dir: Path | None = None):
         "initial_balance": 100.0,
         "enabled_cities": ["nyc"],
         "blacklisted_cities": [],
+        "no_only": False,
+        "yes_enabled": True,
     }
     if cache_dir is not None:
         overrides["cache_dir"] = cache_dir

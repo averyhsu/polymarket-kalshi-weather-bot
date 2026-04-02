@@ -226,7 +226,7 @@ class KalshiClient:
         attempts = 4
         with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
             for attempt in range(1, attempts + 1):
-                response = client.get(f"{self.settings.kalshi_api_base_url}{path}", params=params)
+                response = client.get(f"{self.settings.effective_kalshi_api_base_url}{path}", params=params)
                 if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts:
                     response.raise_for_status()
                     return response.json()
@@ -246,9 +246,14 @@ class KalshiClient:
         api_path = f"/trade-api/v2{path}"
         headers = self._headers("POST", api_path)
         with httpx.Client(timeout=20.0, headers=headers, trust_env=False) as client:
-            response = client.post(f"{self.settings.kalshi_api_base_url}{path}", json=json_payload)
+            response = client.post(f"{self.settings.effective_kalshi_api_base_url}{path}", json=json_payload)
             response.raise_for_status()
             return response.json()
+
+    def preflight_authenticated(self) -> Dict[str, Any]:
+        """Perform a harmless authenticated request to validate credentials and target environment."""
+
+        return self.get("/portfolio/positions", params={"limit": 1})
 
     def list_markets(
         self,

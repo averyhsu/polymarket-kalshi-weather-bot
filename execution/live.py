@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from config import Settings
@@ -23,12 +24,69 @@ class LiveExecutionResult:
     message: str
 
 
+@dataclass(frozen=True)
+class LivePreflightResult:
+    """Outcome of a live broker preflight check."""
+
+    ok: bool
+    environment: str
+    api_base_url: str
+    message: str
+
+
 class LiveBroker:
     """Guarded live trading interface for Kalshi."""
 
     def __init__(self, settings: Settings, database: Database):
         self.settings = settings
         self.database = database
+        self._preflight_passed = False
+
+    def preflight(self) -> LivePreflightResult:
+        """Validate live configuration and demo/prod connectivity before order submission."""
+
+        if not kalshi_credentials_present(self.settings):
+            return LivePreflightResult(
+                False,
+                self.settings.kalshi_environment,
+                self.settings.effective_kalshi_api_base_url,
+                "Kalshi credentials missing",
+            )
+        if not self.settings.kalshi_private_key_path or not Path(self.settings.kalshi_private_key_path).expanduser().exists():
+            return LivePreflightResult(
+                False,
+                self.settings.kalshi_environment,
+                self.settings.effective_kalshi_api_base_url,
+                "Kalshi private key file does not exist",
+            )
+
+        client = KalshiClient(self.settings)
+        try:
+            client.preflight_authenticated()
+        except Exception as exc:
+            return LivePreflightResult(
+                False,
+                self.settings.kalshi_environment,
+                self.settings.effective_kalshi_api_base_url,
+                f"Kalshi authenticated preflight failed: {exc}",
+            )
+
+        self._preflight_passed = True
+        return LivePreflightResult(
+            True,
+            self.settings.kalshi_environment,
+            self.settings.effective_kalshi_api_base_url,
+            "Kalshi authenticated preflight succeeded",
+        )
+
+    def ensure_ready(self) -> None:
+        """Raise if the live broker is not ready to submit orders."""
+
+        if self._preflight_passed:
+            return
+        result = self.preflight()
+        if not result.ok:
+            raise RuntimeError(result.message)
 
     def place_entry_order(
         self,
@@ -41,8 +99,7 @@ class LiveBroker:
 
         if not decision.approved or sizing.contracts < 1:
             return LiveExecutionResult(False, None, None, "decision not approved")
-        if not kalshi_credentials_present(self.settings):
-            return LiveExecutionResult(False, None, None, "Kalshi credentials missing")
+        self.ensure_ready()
 
         client_order_id = f"kalshi-weather-{uuid.uuid4()}"
         order_id = self.database.record_order(

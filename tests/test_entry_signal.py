@@ -49,7 +49,7 @@ class EntrySignalTests(unittest.TestCase):
         )
 
     def test_cheap_yes_gets_rejected_under_floor(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": False, "yes_enabled": True})
         probability = ProbabilityResult(0.70, 0.30, 0.05, 0.10, {})
         decision = choose_trade(market=self.market, probability=probability, risk=self.risk, settings=settings)
         self.assertFalse(decision.approved)
@@ -61,6 +61,8 @@ class EntrySignalTests(unittest.TestCase):
                 "cache_dir": ".cache",
                 "db_path": "test.sqlite3",
                 "no_mid_price_filter_enabled": False,
+                "no_only": False,
+                "yes_enabled": True,
             }
         )
         market = MarketQuote(
@@ -79,7 +81,7 @@ class EntrySignalTests(unittest.TestCase):
         self.assertEqual(decision.side, "NO")
 
     def test_mid_priced_no_gets_rejected_under_filter(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": False, "yes_enabled": True})
         market = MarketQuote(
             **{
                 **self.market.__dict__,
@@ -97,7 +99,13 @@ class EntrySignalTests(unittest.TestCase):
 
     def test_city_override_can_reject_otherwise_valid_entry(self) -> None:
         settings = load_settings(
-            {"cache_dir": ".cache", "db_path": "test.sqlite3", "city_ev_buffer_overrides": {"nyc": 0.20}}
+            {
+                "cache_dir": ".cache",
+                "db_path": "test.sqlite3",
+                "city_ev_buffer_overrides": {"nyc": 0.20},
+                "no_only": False,
+                "yes_enabled": True,
+            }
         )
         market = MarketQuote(
             **{
@@ -124,6 +132,8 @@ class EntrySignalTests(unittest.TestCase):
                 "tail_yes_price_cents": 12,
                 "tail_yes_probability_threshold": 0.58,
                 "tail_uncertainty_threshold": 0.35,
+                "no_only": False,
+                "yes_enabled": True,
             }
         )
         risk = RiskAssessment(0.40, 0.04, 0.88, 1.0, "HEALTHY", True, [])

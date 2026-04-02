@@ -46,21 +46,21 @@ class DecisionTests(unittest.TestCase):
         )
 
     def test_yes_side_selected_when_ev_is_better(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": False, "yes_enabled": True})
         probability = ProbabilityResult(0.62, 0.38, 0.10, 0.30, {})
         decision = choose_trade(market=self.market, probability=probability, risk=self.risk, settings=settings)
         self.assertTrue(decision.approved)
         self.assertEqual(decision.side, "YES")
 
     def test_no_only_mode_rejects_yes_only_edge(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": True})
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": True, "yes_enabled": False})
         probability = ProbabilityResult(0.70, 0.30, 0.05, 0.10, {})
         decision = choose_trade(market=self.market, probability=probability, risk=self.risk, settings=settings)
         self.assertEqual(decision.side, "NONE")
         self.assertFalse(decision.approved)
 
     def test_rejects_when_risk_is_not_allowed(self) -> None:
-        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3"})
+        settings = load_settings({"cache_dir": ".cache", "db_path": "test.sqlite3", "no_only": False, "yes_enabled": True})
         blocked_risk = RiskAssessment(0.5, 0.05, 0.7, 0.0, "BROKEN", False, ["broken source"])
         probability = ProbabilityResult(0.52, 0.48, 0.1, 0.2, {})
         decision = choose_trade(market=self.market, probability=probability, risk=blocked_risk, settings=settings)

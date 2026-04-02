@@ -14,6 +14,8 @@ from data.markets import earliest_reconstructable_market_date
 from data.weather import earliest_historical_forecast_date
 from orchestrator import WeatherTradingOrchestrator
 
+logger = logging.getLogger(__name__)
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the CLI parser."""
@@ -64,6 +66,19 @@ def _parse_iso_date(raw_value: str) -> date:
     return date.fromisoformat(raw_value)
 
 
+def _log_run_header(settings) -> None:
+    logger.info(
+        "Starting bot run: mode=%s environment=%s profile=%s sides=%s cities=%d dry_run=%s api=%s",
+        settings.mode,
+        settings.kalshi_environment,
+        settings.profile,
+        settings.side_mode_label,
+        len(settings.tradable_cities),
+        settings.dry_run,
+        settings.effective_kalshi_api_base_url if settings.mode == "live" else "n/a",
+    )
+
+
 def _resolve_backtest_window(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[date, date]:
     if args.backtest_max_range:
         if args.backtest_days or args.backtest_start or args.backtest_end:
@@ -98,6 +113,7 @@ def main() -> int:
         "verbose": args.verbose or None,
     }
     settings = load_settings(overrides)
+    _log_run_header(settings)
     orchestrator = WeatherTradingOrchestrator(settings)
 
     if args.stats:

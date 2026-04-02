@@ -24,6 +24,8 @@ def _settings(root: Path):
             "historical_data_dir": root / "historical_data",
             "cache_dir": root / ".cache",
             "db_path": root / "bot.sqlite3",
+            "no_only": False,
+            "yes_enabled": True,
         }
     )
 

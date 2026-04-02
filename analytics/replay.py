@@ -468,6 +468,15 @@ def run_historical_backtest(
     if end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
+    logger.info(
+        "Running historical backtest for %s to %s at %02d:%02d UTC (cache=%s, refresh=%s)",
+        start_date.isoformat(),
+        end_date.isoformat(),
+        entry_hour_utc,
+        entry_minute_utc,
+        "on" if use_cache else "off",
+        refresh_cache,
+    )
     cache = HistoricalBacktestCache(
         settings,
         entry_hour_utc=entry_hour_utc,
@@ -483,6 +492,7 @@ def run_historical_backtest(
     markets_by_target: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
     for market in markets:
         markets_by_target[market.target_date].append(market)
+    logger.info("Loaded %d settled market definitions for backtest evaluation", len(markets))
 
     cash = settings.initial_balance
     starting_balance = settings.initial_balance
@@ -503,7 +513,9 @@ def run_historical_backtest(
 
     cycle_start = start_date - timedelta(days=1)
     cycle_end = end_date
-    for cycle_day in _daterange(cycle_start, cycle_end):
+    cycle_days = _daterange(cycle_start, cycle_end)
+    total_cycles = len(cycle_days)
+    for cycle_index, cycle_day in enumerate(cycle_days, start=1):
         realized_today = 0.0
         still_open: List[BacktestPosition] = []
         for position in open_positions:
@@ -525,6 +537,13 @@ def run_historical_backtest(
 
         target_date = cycle_day + timedelta(days=1)
         entry_time_utc = _entry_timestamp(cycle_day, entry_hour_utc, entry_minute_utc)
+        logger.info(
+            "[%d/%d] Evaluating target date %s (%d existing open positions)",
+            cycle_index,
+            total_cycles,
+            target_date.isoformat(),
+            len(open_positions),
+        )
         evaluated_today = 0
         candidate_entries: List[Dict[str, object]] = []
         for market in markets_by_target.get(target_date, []):
@@ -669,6 +688,7 @@ def run_historical_backtest(
             diagnostic["rationale"] = [reason]
             candidate_diagnostics.append(diagnostic)
 
+        executed_this_cycle = 0
         for candidate in selected:
             market = candidate["market"]
             decision = candidate["decision"]
@@ -683,6 +703,7 @@ def run_historical_backtest(
                 continue
 
             entries_executed += 1
+            executed_this_cycle += 1
             cash -= total_cost
             open_positions.append(
                 BacktestPosition(
@@ -722,6 +743,19 @@ def run_historical_backtest(
                 "equity": equity,
             }
         )
+        logger.info(
+            "[%d/%d] Finished %s: evaluated=%d approved=%d executed=%d settled_today=%d open=%d cash=%.2f equity=%.2f",
+            cycle_index,
+            total_cycles,
+            target_date.isoformat(),
+            evaluated_today,
+            len(candidate_entries),
+            executed_this_cycle,
+            settled_positions,
+            len(open_positions),
+            cash,
+            equity,
+        )
 
     final_settlements = 0
     for position in open_positions:
@@ -749,6 +783,13 @@ def run_historical_backtest(
 
     total_realized = sum(float(trade["realized_pnl"]) for trade in executed_trades)
     total_fees = sum(float(trade["fees"]) for trade in executed_trades)
+    logger.info(
+        "Historical backtest complete: trades=%d pnl=%.2f ending_balance=%.2f max_drawdown=%.4f",
+        len(executed_trades),
+        total_realized,
+        cash,
+        max_drawdown,
+    )
     return {
         "backtest": {
             "start_date": start_date.isoformat(),

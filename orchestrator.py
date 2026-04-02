@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -23,6 +24,8 @@ from data.weather import ForecastSnapshot, fetch_forecast_snapshot, fetch_observ
 from db.models import Database, PositionRecord
 from execution.live import LiveBroker
 from execution.paper import PaperBroker
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -222,6 +225,15 @@ class WeatherTradingOrchestrator:
         summary = CycleSummary()
         if self.settings.mode == "paper":
             summary.settlements = self.settle_matured_positions()
+        else:
+            preflight = self.live.preflight()
+            if not preflight.ok:
+                raise RuntimeError(preflight.message)
+            logger.info(
+                "Live broker preflight succeeded for %s (%s)",
+                preflight.environment,
+                preflight.api_base_url,
+            )
 
         markets = fetch_kxhigh_markets(self.settings)
         summary.scanned_markets = len(markets)

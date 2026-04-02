@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Dict, List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -16,6 +16,8 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "kalshi_weather_bot.sqlite3"
 DEFAULT_CACHE_DIR = PROJECT_ROOT / ".cache"
 DEFAULT_HISTORICAL_DATA_DIR = PROJECT_ROOT / "historical_data" / "backtests"
 DEFAULT_USER_AGENT = "kalshi-weather-bot/1.0 (https://github.com/averyhsu/polymarket-kalshi-weather-bot)"
+DEFAULT_KALSHI_PRODUCTION_API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+DEFAULT_KALSHI_DEMO_API_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 DEFAULT_ENABLED_CITIES = [
     "atlanta",
     "austin",
@@ -145,12 +147,10 @@ class Settings(BaseSettings):
     historical_data_dir: Path = Field(default=DEFAULT_HISTORICAL_DATA_DIR, alias="HISTORICAL_DATA_DIR")
     user_agent: str = Field(default=DEFAULT_USER_AGENT, alias="USER_AGENT")
 
+    kalshi_environment: str = Field(default="production", alias="KALSHI_ENVIRONMENT")
     kalshi_api_key_id: Optional[str] = Field(default=None, alias="KALSHI_API_KEY_ID")
     kalshi_private_key_path: Optional[Path] = Field(default=None, alias="KALSHI_PRIVATE_KEY_PATH")
-    kalshi_api_base_url: str = Field(
-        default="https://api.elections.kalshi.com/trade-api/v2",
-        alias="KALSHI_API_BASE_URL",
-    )
+    kalshi_api_base_url: Optional[str] = Field(default=None, alias="KALSHI_API_BASE_URL")
 
     enabled_cities: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_ENABLED_CITIES),
@@ -243,6 +243,24 @@ class Settings(BaseSettings):
             raise ValueError(f"profile must be one of {', '.join(PROFILE_PRESETS)}")
         return normalized
 
+    @field_validator("kalshi_environment")
+    @classmethod
+    def validate_kalshi_environment(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"demo", "production"}:
+            raise ValueError("KALSHI_ENVIRONMENT must be 'demo' or 'production'")
+        return normalized
+
+    @field_validator("kalshi_api_base_url")
+    @classmethod
+    def normalize_kalshi_api_base_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        return normalized.rstrip("/")
+
     @field_validator("enabled_cities", "blacklisted_cities", mode="before")
     @classmethod
     def parse_city_lists(cls, value: object) -> List[str]:
@@ -257,6 +275,28 @@ class Settings(BaseSettings):
     @classmethod
     def parse_city_enabled_mapping(cls, value: object) -> Dict[str, bool]:
         return _parse_bool_mapping(value)
+
+    @model_validator(mode="after")
+    def validate_live_kalshi_configuration(self) -> "Settings":
+        expected_url = self.default_kalshi_api_base_url(self.kalshi_environment)
+        if not self.kalshi_api_base_url:
+            self.kalshi_api_base_url = expected_url
+        elif self.kalshi_api_base_url != expected_url:
+            raise ValueError(
+                f"KALSHI_API_BASE_URL must match the {self.kalshi_environment} environment URL: {expected_url}"
+            )
+
+        if self.live_enabled and not self.kalshi_credentials_present:
+            raise ValueError("KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH are required when BOT_MODE=live")
+        return self
+
+    @staticmethod
+    def default_kalshi_api_base_url(environment: str) -> str:
+        return (
+            DEFAULT_KALSHI_DEMO_API_BASE_URL
+            if environment == "demo"
+            else DEFAULT_KALSHI_PRODUCTION_API_BASE_URL
+        )
 
     @property
     def active_profile(self) -> ProfilePreset:
@@ -276,8 +316,16 @@ class Settings(BaseSettings):
         return self.mode == "live"
 
     @property
+    def effective_kalshi_api_base_url(self) -> str:
+        return str(self.kalshi_api_base_url or self.default_kalshi_api_base_url(self.kalshi_environment))
+
+    @property
     def kalshi_credentials_present(self) -> bool:
         return bool(self.kalshi_api_key_id and self.kalshi_private_key_path)
+
+    @property
+    def side_mode_label(self) -> str:
+        return "NO-only" if self.no_only and not self.yes_enabled else "YES+NO"
 
     def city_ev_buffer(self, city_key: str) -> float:
         return float(self.city_ev_buffer_overrides.get(city_key.lower(), 0.0))
@@ -294,7 +342,10 @@ def load_settings(overrides: Optional[Dict[str, object]] = None) -> Settings:
         return settings
 
     merged = settings.model_dump()
-    merged.update({key: value for key, value in overrides.items() if value is not None})
+    sanitized_overrides = {key: value for key, value in overrides.items() if value is not None}
+    if "kalshi_environment" in sanitized_overrides and "kalshi_api_base_url" not in sanitized_overrides:
+        merged["kalshi_api_base_url"] = None
+    merged.update(sanitized_overrides)
     updated = Settings(**merged)
     updated.cache_dir.mkdir(parents=True, exist_ok=True)
     updated.historical_data_dir.mkdir(parents=True, exist_ok=True)

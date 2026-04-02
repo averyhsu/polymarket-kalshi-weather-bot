@@ -134,12 +134,13 @@ Important values:
 
 - `BOT_MODE=paper|live`
 - `BOT_PROFILE=conservative|balanced|aggressive`
+- `KALSHI_ENVIRONMENT=production|demo`
 - `DB_PATH=kalshi_weather_bot.sqlite3`
 - `HISTORICAL_DATA_DIR=historical_data/backtests`
 - `ENABLED_CITIES=atlanta,austin,boston,chicago,dallas,denver,houston,las_vegas,los_angeles,miami,minneapolis,new_orleans,nyc,oklahoma_city,philadelphia,phoenix,san_antonio,san_francisco,seattle,washington_dc`
 - `BLACKLISTED_CITIES=`
-- `NO_ONLY=false`
-- `YES_ENABLED=true`
+- `NO_ONLY=true`
+- `YES_ENABLED=false`
 - `YES_MIN_EV=0.08`
 - `NO_MIN_EV=0.04`
 - `YES_MIN_PRICE_CENTS=10`
@@ -159,7 +160,7 @@ Important values:
 - `KALSHI_API_KEY_ID=...`
 - `KALSHI_PRIVATE_KEY_PATH=...`
 
-Live execution requires both Kalshi credential variables. Paper mode does not.
+Live execution requires both Kalshi credential variables. Paper mode does not. `KALSHI_ENVIRONMENT=demo` uses Kalshi's demo API root and `KALSHI_ENVIRONMENT=production` uses the production API root.
 
 ## Modes
 
@@ -177,8 +178,9 @@ The bot has two execution modes and one safety flag:
 This means the current repo is:
 
 - not a separate market-data sandbox
-- not a Kalshi demo-account mode yet
 - not a continuous loop by default
+
+The live path supports both Kalshi demo and production environments. The deployment recommendation below uses demo only.
 
 ## Paper Trading Quickstart
 
@@ -274,6 +276,7 @@ Live mode is intentionally conservative:
 - It only submits orders when `--mode live` is used.
 - It reads the same live public Kalshi quotes as paper mode; the difference is that execution is real.
 - It refuses to place live orders without `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH`.
+- It validates the configured Kalshi environment and does an authenticated preflight before submitting orders.
 - `--dry-run` works in live mode, so you can validate the scan/decision path without sending orders.
 - The current live path submits entry orders only and records them locally; you should test with very small size first.
 
@@ -282,6 +285,78 @@ Example:
 ```bash
 python main.py --mode live --profile conservative --dry-run
 python main.py --mode live --profile conservative
+```
+
+Kalshi docs:
+
+- [Demo Environment](https://docs.kalshi.com/getting_started/demo_env)
+- [Authenticated Requests](https://docs.kalshi.com/getting_started/quick_start_authenticated_requests)
+
+## Computer B Demo Deployment
+
+The recommended deployment is a separate Windows machine, "Computer B", running the current `NO_ONLY=true` / `YES_ENABLED=false` strategy once per UTC day at `20:00`.
+
+### 1. Clone a pinned repo version on Computer B
+
+```powershell
+mkdir C:\Trading
+cd C:\Trading
+git clone YOUR_REPO_URL weather-prediction
+cd weather-prediction
+git checkout YOUR_DEPLOY_COMMIT_SHA
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### 2. Create Computer B's `.env`
+
+Create `C:\Trading\weather-prediction\.env`:
+
+```dotenv
+BOT_MODE=live
+BOT_PROFILE=balanced
+DRY_RUN=false
+
+NO_ONLY=true
+YES_ENABLED=false
+
+KALSHI_ENVIRONMENT=demo
+KALSHI_API_KEY_ID=YOUR_DEMO_API_KEY_ID
+KALSHI_PRIVATE_KEY_PATH=C:\Trading\weather-prediction\secrets\kalshi-demo.pem
+
+DB_PATH=C:\Trading\weather-prediction\state\trading.db
+HISTORICAL_DATA_DIR=C:\Trading\weather-prediction\historical_data
+```
+
+Create the supporting folders and copy your Kalshi demo private key into `C:\Trading\weather-prediction\secrets\kalshi-demo.pem`.
+
+### 3. Run the live preflight and a manual smoke test
+
+```powershell
+cd C:\Trading\weather-prediction
+.\.venv\Scripts\Activate.ps1
+python main.py --mode live --dry-run
+python main.py --mode live
+```
+
+### 4. Register the scheduled task
+
+The checked-in runner [scripts/run_live_demo.ps1](C:\Users\avery\OneDrive - andrew.cmu.edu\Projects\weather prediction\scripts\run_live_demo.ps1) can safely be scheduled **hourly**. It only executes the bot when the current UTC hour is `20`, and it records the last successful UTC run date so Computer B does not double-submit.
+
+Create the task on Computer B:
+
+```powershell
+schtasks /Create /F /SC HOURLY /MO 1 /TN "KalshiWeatherDemo" /TR "powershell.exe -ExecutionPolicy Bypass -File C:\Trading\weather-prediction\scripts\run_live_demo.ps1" /ST 00:00
+```
+
+Useful checks:
+
+```powershell
+Get-Content C:\Trading\weather-prediction\logs\live-demo.log -Tail 100
+sqlite3 C:\Trading\weather-prediction\state\trading.db ".tables"
+sqlite3 C:\Trading\weather-prediction\state\trading.db "select count(*) from orders;"
 ```
 
 ## Strategy Logic Summary
