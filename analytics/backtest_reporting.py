@@ -17,12 +17,13 @@ def build_backtest_result_package(
     *,
     save_artifacts: bool = True,
     baseline_path: Optional[Path] = None,
+    artifact_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a human-friendly package around a raw backtest result."""
 
     backtest = dict(raw_result["backtest"])
     generated_at = datetime.now(timezone.utc).replace(microsecond=0)
-    run_id = _build_run_id(backtest, settings, generated_at)
+    run_id = artifact_name if artifact_name else _build_run_id(backtest, settings, generated_at)
     results_dir = (settings.historical_data_dir / "results").resolve()
     json_path = results_dir / f"{run_id}.json"
     markdown_path = results_dir / f"{run_id}.md"

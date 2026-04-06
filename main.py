@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backtest-raw", action="store_true", help="Print the full machine-readable backtest package as JSON")
     parser.add_argument("--backtest-exits", action="store_true", help="Enable intraday exit simulation during backtests (stop-loss, profit-take, closeout)")
     parser.add_argument("--backtest-no-save", action="store_true", help="Do not save JSON and Markdown artifacts for this backtest run")
+    parser.add_argument("--backtest-name", type=str, help="Custom name for the saved artifact files (replaces auto-generated ID)")
     parser.add_argument("--backtest-baseline", type=str, help="Optional JSON artifact path to compare the run against")
     parser.add_argument("--dashboard", action="store_true", help="Launch the local dashboard for saved backtest artifacts")
     parser.add_argument("--dashboard-artifact", type=str, help="Optional JSON artifact path to open in the local dashboard")
@@ -174,6 +175,7 @@ def main() -> int:
             settings,
             save_artifacts=not args.backtest_no_save,
             baseline_path=None if not args.backtest_baseline else args.backtest_baseline,
+            artifact_name=args.backtest_name,
         )
         if args.backtest_raw:
             _print_json(result)

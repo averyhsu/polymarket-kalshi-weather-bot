@@ -229,6 +229,7 @@ python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
 python main.py --backtest --backtest-days 30 --backtest-refresh-cache
 python main.py --backtest --backtest-days 30 --backtest-raw
 python main.py --backtest --backtest-days 30 --backtest-exits
+python main.py --backtest --backtest-days 30 --backtest-name "my-experiment"
 python main.py --backtest --backtest-days 30 --backtest-no-save
 python main.py --backtest --backtest-days 30 --backtest-baseline historical_data/backtests/results/<baseline>.json
 python main.py --dashboard
@@ -266,6 +267,7 @@ Backtest output now has two layers:
 Useful flags:
 
 - `--backtest-exits` enables intraday exit simulation using hourly candlestick data (stop-loss, profit-take, closeout near event, EV-gone)
+- `--backtest-name <name>` saves artifacts with a custom name instead of the auto-generated ID (e.g. `my-experiment.json` + `my-experiment.md`)
 - `--backtest-raw` prints the full machine-readable backtest package to stdout as JSON
 - `--backtest-no-save` skips writing the JSON and Markdown artifacts for that run
 - `--backtest-baseline <path>` compares the current run against a prior JSON artifact and shows delta vs baseline
