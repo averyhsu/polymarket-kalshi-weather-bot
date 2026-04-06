@@ -76,14 +76,23 @@ kalshi-weather-bot/
 ├── analytics/
 │   ├── pnl.py
 │   ├── calibration.py
-│   └── replay.py
+│   ├── replay.py
+│   ├── backtest_reporting.py
+│   └── backtest_dashboard.py
+├── dashboard/
+│   ├── index.html
+│   ├── app.js
+│   └── styles.css
 ├── db/
 │   └── models.py
 └── tests/
     ├── test_probability.py
     ├── test_decision.py
     ├── test_risk.py
-    └── test_sizing.py
+    ├── test_sizing.py
+    ├── test_replay.py
+    ├── test_backtest_reporting.py
+    └── test_backtest_dashboard.py
 ```
 
 ## Installation
@@ -219,6 +228,7 @@ python main.py --backtest --backtest-start 2026-03-01 --backtest-end 2026-03-31
 python main.py --backtest --backtest-days 30 --backtest-entry-hour-utc 20
 python main.py --backtest --backtest-days 30 --backtest-refresh-cache
 python main.py --backtest --backtest-days 30 --backtest-raw
+python main.py --backtest --backtest-days 30 --backtest-exits
 python main.py --backtest --backtest-days 30 --backtest-no-save
 python main.py --backtest --backtest-days 30 --backtest-baseline historical_data/backtests/results/<baseline>.json
 python main.py --dashboard
@@ -231,7 +241,8 @@ What the backtest does:
 - reconstructs day-ahead entry quotes from Kalshi historical hourly candlesticks
 - reconstructs historical forecasts from archived Open-Meteo single runs on the entry day
 - runs the same probability, risk, decision, and Kelly sizing logic as live and paper mode
-- enters once per cycle and holds positions to settlement
+- enters once per cycle and holds positions to settlement by default
+- optionally simulates intraday exit rules (stop-loss, profit-take, closeout, EV-gone) at hourly checkpoints via `--backtest-exits`
 - reports P&L, drawdown, win rate, Brier score, skip reasons, and trade-level details
 - stores historical market definitions, entry quotes, and archived forecast snapshots in a persistent local dataset directory so repeated backtests do not refetch the same month of data every time
 
@@ -254,6 +265,7 @@ Backtest output now has two layers:
 
 Useful flags:
 
+- `--backtest-exits` enables intraday exit simulation using hourly candlestick data (stop-loss, profit-take, closeout near event, EV-gone)
 - `--backtest-raw` prints the full machine-readable backtest package to stdout as JSON
 - `--backtest-no-save` skips writing the JSON and Markdown artifacts for that run
 - `--backtest-baseline <path>` compares the current run against a prior JSON artifact and shows delta vs baseline
@@ -298,7 +310,6 @@ The dashboard serves a local webpage and reads only saved JSON artifacts from `h
 
 What it does not do yet:
 
-- it does not simulate intraday exits from historical quote paths
 - it does not replay true archived ensemble members; uncertainty is approximated from multiple archived deterministic runs on the entry day
 - it does not model queue position or partial fills
 
@@ -531,7 +542,7 @@ python -m unittest discover -s tests -v
 - The probability engine uses the required Gumbel framework and simple empirical diagnostics, but not a full multi-model weather blend.
 - Fees are modeled conservatively as fixed per-contract approximations.
 - Live execution is intentionally narrow and should be treated as a guarded MVP.
-- The historical backtest currently holds positions to settlement instead of simulating intraday exit timing.
+- Backtest exit simulation (`--backtest-exits`) uses frozen entry-time probability since intraday forecast updates are not available from Open-Meteo archives. This means probability drift never triggers; only price-driven exits (stop-loss, profit-take, closeout, EV-gone) fire.
 - Historical forecast uncertainty is reconstructed from archived deterministic runs, not archived ensemble-member fields.
 
 ## Settlement Caveats
@@ -547,7 +558,6 @@ Important practical caveats:
 ## Future Improvements
 
 - Replace seeded climatology with station-specific historical normals.
-- Add intraday historical exit simulation and richer archived replay.
 - Add live exit-order management and reconciliation.
 - Add portfolio-level city-correlation controls.
 - Add richer calibration and settlement-quality reports.
