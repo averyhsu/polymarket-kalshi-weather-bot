@@ -381,6 +381,7 @@ class WeatherTradingOrchestrator:
         entry_minute_utc: int = 0,
         use_cache: bool = True,
         refresh_cache: bool = False,
+        simulate_exits: bool = False,
     ) -> Dict[str, object]:
         """Run a historical day-ahead backtest."""
 
@@ -392,6 +393,7 @@ class WeatherTradingOrchestrator:
             entry_minute_utc=entry_minute_utc,
             use_cache=use_cache,
             refresh_cache=refresh_cache,
+            simulate_exits=simulate_exits,
         )
 
     def warm_backtest_cache(

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find . -maxdepth 2 -type f -name *.py)",
+      "Bash(find '/c/Users/avery/OneDrive - andrew.cmu.edu/Projects/weather prediction' -maxdepth 3 -type f -name *.py -not -path ./.venv/* -not -path */__pycache__/*)"
+    ]
+  }
+}

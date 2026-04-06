@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -15,17 +15,22 @@ from config import Settings
 from core.calibration import CalibrationContext, build_samples_from_backtest_trades
 from core.decision import choose_trade
 from core.entry_selection import select_ranked_candidates
+from core.exits import evaluate_exit
 from core.probability import estimate_bucket_probability
 from core.risk import assess_entry_risk
 from core.sizing import calculate_kelly_size
 from data.climatology import bucket_probability_from_climatology
 from data.markets import (
+    CandlestickPoint,
     HistoricalMarketDefinition,
     MarketQuote,
+    deserialize_candlestick_series,
     deserialize_historical_market,
     deserialize_market_quote,
+    fetch_historical_candlestick_series,
     fetch_historical_market_definitions,
     fetch_historical_market_quote,
+    serialize_candlestick_series,
     serialize_historical_market,
     serialize_market_quote,
 )
@@ -35,14 +40,15 @@ from data.weather import (
     fetch_historical_forecast_snapshot,
     serialize_forecast_snapshot,
 )
-from db.models import Database
+from db.models import Database, PositionRecord
 
 logger = logging.getLogger(__name__)
+MARKET_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass
 class BacktestPosition:
-    """Open historical position held until settlement."""
+    """Open historical position held until settlement or early exit."""
 
     ticker: str
     city_key: str
@@ -56,6 +62,15 @@ class BacktestPosition:
     bucket_low: float
     bucket_high: float
     actual_high_f: float
+    # Fields for exit simulation (optional, backward-compatible defaults):
+    entry_time: Optional[datetime] = None
+    series_ticker: str = ""
+    use_historical_api: bool = False
+    market_close_time: Optional[datetime] = None
+    city_name: str = ""
+    strike_label: str = ""
+    title: str = ""
+    subtitle: str = ""
 
 
 class HistoricalBacktestCache:
@@ -72,7 +87,8 @@ class HistoricalBacktestCache:
         self.markets_dir = self.base_dir / "markets"
         self.quotes_dir = self.base_dir / "quotes"
         self.forecasts_dir = self.base_dir / "forecasts"
-        for path in (self.markets_dir, self.quotes_dir, self.forecasts_dir):
+        self.candlesticks_dir = self.base_dir / "candlesticks"
+        for path in (self.markets_dir, self.quotes_dir, self.forecasts_dir, self.candlesticks_dir):
             path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -99,6 +115,8 @@ class HistoricalBacktestCache:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return None
+        if int(payload.get("cache_schema_version") or 0) != MARKET_CACHE_SCHEMA_VERSION:
+            return None
         try:
             return [deserialize_historical_market(item) for item in payload.get("markets", [])]
         except (KeyError, TypeError, ValueError):
@@ -107,6 +125,7 @@ class HistoricalBacktestCache:
     def save_markets(self, target_date: date, markets: List[HistoricalMarketDefinition]) -> None:
         path = self._markets_path(target_date)
         payload = {
+            "cache_schema_version": MARKET_CACHE_SCHEMA_VERSION,
             "target_date": target_date.isoformat(),
             "cached_at": self._cached_at(),
             "markets": [serialize_historical_market(market) for market in markets],
@@ -161,6 +180,35 @@ class HistoricalBacktestCache:
             "target_date": target_date.isoformat(),
             "cached_at": self._cached_at(),
             "forecast": None if forecast is None else serialize_forecast_snapshot(forecast),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _candlesticks_path(self, ticker: str) -> Path:
+        return self.candlesticks_dir / self._entry_stamp() / f"{ticker}.json"
+
+    def load_candlestick_series(self, ticker: str) -> Optional[List[CandlestickPoint]]:
+        path = self._candlesticks_path(ticker)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        raw = payload.get("candlesticks")
+        if raw is None:
+            return None
+        try:
+            return deserialize_candlestick_series(raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def save_candlestick_series(self, ticker: str, series: List[CandlestickPoint]) -> None:
+        path = self._candlesticks_path(ticker)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ticker": ticker,
+            "cached_at": self._cached_at(),
+            "candlesticks": serialize_candlestick_series(series),
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -280,7 +328,171 @@ def _settle_position(position: BacktestPosition, settings: Settings) -> Dict[str
         "payout": payout,
         "realized_pnl": realized,
         "fees": position.entry_fees,
+        "exited_early": False,
+        "exit_reason": None,
+        "exit_time": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Exit simulation helpers
+# ---------------------------------------------------------------------------
+
+
+def _as_position_record(position: BacktestPosition) -> PositionRecord:
+    """Adapt a BacktestPosition for evaluate_exit()."""
+
+    return PositionRecord(
+        id=0,
+        mode="backtest",
+        ticker=position.ticker,
+        city_key=position.city_key,
+        target_date=position.target_date.isoformat(),
+        side=position.side,
+        contracts=position.contracts,
+        avg_price=position.entry_price,
+        status="open",
+        opened_at="",
+        closed_at=None,
+        fill_price=position.entry_price,
+        current_mark=position.entry_price,
+        unrealized_pnl=0.0,
+        realized_pnl=0.0,
+        metadata={"entry_probability_yes": position.probability_yes},
+    )
+
+
+def _candlestick_to_quote(candle: CandlestickPoint, position: BacktestPosition) -> MarketQuote:
+    """Build a synthetic MarketQuote from a candlestick for exit evaluation."""
+
+    return MarketQuote(
+        ticker=position.ticker,
+        series_ticker=position.series_ticker,
+        city_key=position.city_key,
+        city_name=position.city_name,
+        target_date=position.target_date,
+        bucket_low=position.bucket_low,
+        bucket_high=position.bucket_high,
+        strike_label=position.strike_label,
+        title=position.title or position.ticker,
+        subtitle=position.subtitle or "",
+        yes_bid=candle.yes_bid,
+        yes_ask=candle.yes_ask,
+        no_bid=candle.no_bid,
+        no_ask=candle.no_ask,
+        last_price=candle.last_price,
+        volume=candle.volume,
+        open_interest=candle.open_interest,
+        updated_time=candle.timestamp,
+        status="open",
+    )
+
+
+def _simulate_exit_checkpoints(
+    position: BacktestPosition,
+    candlestick_series: List[CandlestickPoint],
+    settings: Settings,
+) -> Optional[Dict[str, object]]:
+    """Walk hourly candles and evaluate exit rules.
+
+    Returns exit info dict if an exit triggers, or None to hold to settlement.
+    Probability is frozen at entry-time value (no intraday forecast updates available).
+    """
+
+    if not candlestick_series or position.entry_time is None:
+        return None
+
+    record = _as_position_record(position)
+    for candle in candlestick_series:
+        if candle.timestamp <= position.entry_time:
+            continue
+        quote = _candlestick_to_quote(candle, position)
+        # evaluate_exit uses naive datetimes internally (datetime.combine produces naive).
+        # Strip tzinfo so the subtraction doesn't fail.
+        now_naive = candle.timestamp.replace(tzinfo=None) if candle.timestamp.tzinfo else candle.timestamp
+        decision = evaluate_exit(
+            position=record,
+            market=quote,
+            entry_probability_yes=position.probability_yes,
+            current_probability_yes=position.probability_yes,
+            settings=settings,
+            now=now_naive,
+        )
+        if decision.action == "EXIT":
+            exit_bid = candle.yes_bid if position.side == "YES" else candle.no_bid
+            if exit_bid <= 0.0:
+                continue
+            return {
+                "exit_price": exit_bid,
+                "exit_time": candle.timestamp,
+                "exit_reason": decision.reason,
+            }
+    return None
+
+
+def _exit_position(
+    position: BacktestPosition,
+    exit_price: float,
+    exit_reason: str,
+    exit_time: datetime,
+    settings: Settings,
+) -> Dict[str, object]:
+    """Calculate realized P&L for an early exit."""
+
+    exit_fees = settings.fee_per_contract * position.contracts
+    realized = (exit_price - position.entry_price) * position.contracts - position.entry_fees - exit_fees
+    return {
+        "ticker": position.ticker,
+        "city": position.city_key,
+        "target_date": position.target_date.isoformat(),
+        "side": position.side,
+        "contracts": position.contracts,
+        "entry_price": position.entry_price,
+        "predicted_probability_yes": position.probability_yes,
+        "expected_value": position.expected_value,
+        "actual_high_f": position.actual_high_f,
+        "settled_yes": None,
+        "payout": exit_price,
+        "realized_pnl": realized,
+        "fees": position.entry_fees + exit_fees,
+        "exited_early": True,
+        "exit_reason": exit_reason,
+        "exit_time": exit_time.isoformat(),
+    }
+
+
+def _load_or_fetch_candlestick_series(
+    settings: Settings,
+    cache: HistoricalBacktestCache,
+    position: BacktestPosition,
+    market_def: HistoricalMarketDefinition,
+    use_cache: bool,
+    refresh_cache: bool,
+) -> List[CandlestickPoint]:
+    """Load candlestick series from cache or fetch from API."""
+
+    if use_cache and not refresh_cache:
+        cached = cache.load_candlestick_series(position.ticker)
+        if cached is not None:
+            return cached
+
+    if position.entry_time is None:
+        return []
+    end_time = position.market_close_time
+    if end_time is None:
+        end_time = datetime.combine(
+            position.target_date + timedelta(days=1),
+            time(hour=6, tzinfo=timezone.utc),
+        )
+    series = fetch_historical_candlestick_series(
+        settings,
+        market_def,
+        start_time_utc=position.entry_time,
+        end_time_utc=end_time,
+    )
+    if use_cache:
+        cache.save_candlestick_series(position.ticker, series)
+    return series
 
 
 def _load_or_fetch_markets(
@@ -357,8 +569,10 @@ def warm_historical_backtest_cache(
 
     quotes_cached = 0
     forecasts_cached = 0
+    candlesticks_cached = 0
     quote_fetches = 0
     forecast_fetches = 0
+    candlestick_fetches = 0
     cycle_start = start_date - timedelta(days=1)
     cycle_end = end_date
     markets_by_target: Dict[date, List[HistoricalMarketDefinition]] = defaultdict(list)
@@ -382,6 +596,8 @@ def warm_historical_backtest_cache(
         day_quote_fetches = 0
         day_forecast_hits = 0
         day_forecast_fetches = 0
+        day_candle_hits = 0
+        day_candle_fetches = 0
         for market in target_markets:
             if not refresh_cache and cache.load_quote(market.ticker) is not None:
                 quotes_cached += 1
@@ -409,8 +625,27 @@ def warm_historical_backtest_cache(
                 day_forecast_fetches += 1
                 if forecast is not None:
                     forecasts_cached += 1
+
+            if not refresh_cache and cache.load_candlestick_series(market.ticker) is not None:
+                candlesticks_cached += 1
+                day_candle_hits += 1
+            else:
+                end_time = market.close_time
+                if end_time is None:
+                    end_time = datetime.combine(
+                        market.target_date + timedelta(days=1),
+                        time(hour=6, tzinfo=timezone.utc),
+                    )
+                series = fetch_historical_candlestick_series(
+                    settings, market, start_time_utc=entry_time_utc, end_time_utc=end_time,
+                )
+                cache.save_candlestick_series(market.ticker, series)
+                candlestick_fetches += 1
+                day_candle_fetches += 1
+                if series:
+                    candlesticks_cached += 1
         logger.info(
-            "[%d/%d] Finished %s: quotes cached=%d fetched=%d | forecasts cached=%d fetched=%d | cumulative quotes=%d/%d forecasts=%d/%d",
+            "[%d/%d] Finished %s: quotes cached=%d fetched=%d | forecasts cached=%d fetched=%d | candles cached=%d fetched=%d",
             cycle_index,
             total_cycles,
             target_date.isoformat(),
@@ -418,18 +653,17 @@ def warm_historical_backtest_cache(
             day_quote_fetches,
             day_forecast_hits,
             day_forecast_fetches,
-            quotes_cached,
-            quotes_cached + quote_fetches,
-            forecasts_cached,
-            forecasts_cached + forecast_fetches,
+            day_candle_hits,
+            day_candle_fetches,
         )
 
     logger.info(
-        "Historical dataset ready at %s (markets=%d, quotes=%d, forecasts=%d)",
+        "Historical dataset ready at %s (markets=%d, quotes=%d, forecasts=%d, candlesticks=%d)",
         cache.base_dir,
         len(markets),
         quotes_cached,
         forecasts_cached,
+        candlesticks_cached,
     )
 
     return {
@@ -440,8 +674,10 @@ def warm_historical_backtest_cache(
             "markets_cached": len(markets),
             "quotes_cached": quotes_cached,
             "forecasts_cached": forecasts_cached,
+            "candlesticks_cached": candlesticks_cached,
             "quote_fetches": quote_fetches,
             "forecast_fetches": forecast_fetches,
+            "candlestick_fetches": candlestick_fetches,
             "cache_dir": str(cache.base_dir),
             "refreshed": refresh_cache,
         }
@@ -457,25 +693,28 @@ def run_historical_backtest(
     entry_minute_utc: int = 0,
     use_cache: bool = True,
     refresh_cache: bool = False,
+    simulate_exits: bool = False,
 ) -> Dict[str, object]:
     """Run a historical day-ahead backtest on settled KXHIGH markets.
 
     The backtest enters positions once per cycle using historical Kalshi hourly candlesticks and
-    archived Open-Meteo single runs. Positions are held to settlement, which keeps the simulation
-    aligned with the data we can reliably reconstruct today.
+    archived Open-Meteo single runs. When *simulate_exits* is False (default), positions are held
+    to settlement. When True, exit rules (stop-loss, profit-take, closeout, EV-gone) are evaluated
+    at each hourly candlestick during the hold period.
     """
 
     if end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
     logger.info(
-        "Running historical backtest for %s to %s at %02d:%02d UTC (cache=%s, refresh=%s)",
+        "Running historical backtest for %s to %s at %02d:%02d UTC (cache=%s, refresh=%s, exits=%s)",
         start_date.isoformat(),
         end_date.isoformat(),
         entry_hour_utc,
         entry_minute_utc,
         "on" if use_cache else "off",
         refresh_cache,
+        "on" if simulate_exits else "off",
     )
     cache = HistoricalBacktestCache(
         settings,
@@ -510,6 +749,10 @@ def run_historical_backtest(
     max_drawdown = 0.0
     daily_summaries: List[Dict[str, object]] = []
     candidate_diagnostics: List[Dict[str, object]] = []
+    early_exits = 0
+    early_exit_reason_counts: Counter[str] = Counter()
+    # Build a lookup from ticker to market definition for candlestick fetching.
+    market_def_by_ticker: Dict[str, HistoricalMarketDefinition] = {m.ticker: m for m in markets}
 
     cycle_start = start_date - timedelta(days=1)
     cycle_end = end_date
@@ -522,6 +765,29 @@ def run_historical_backtest(
             if position.target_date >= cycle_day:
                 still_open.append(position)
                 continue
+            # Position has matured — check for early exit before settling.
+            if simulate_exits and position.entry_time is not None:
+                market_def = market_def_by_ticker.get(position.ticker)
+                if market_def is not None:
+                    series = _load_or_fetch_candlestick_series(
+                        settings, cache, position, market_def, use_cache, refresh_cache,
+                    )
+                    exit_info = _simulate_exit_checkpoints(position, series, settings)
+                    if exit_info is not None:
+                        exit_result = _exit_position(
+                            position,
+                            float(exit_info["exit_price"]),
+                            str(exit_info["exit_reason"]),
+                            exit_info["exit_time"],
+                            settings,
+                        )
+                        cash += float(exit_info["exit_price"]) * position.contracts - settings.fee_per_contract * position.contracts
+                        realized_today += float(exit_result["realized_pnl"])
+                        settled_positions += 1
+                        early_exits += 1
+                        early_exit_reason_counts[str(exit_info["exit_reason"])] += 1
+                        executed_trades.append(exit_result)
+                        continue
             settlement = _settle_position(position, settings)
             cash += float(settlement["payout"]) * position.contracts
             realized_today += float(settlement["realized_pnl"])
@@ -719,6 +985,14 @@ def run_historical_backtest(
                     bucket_low=market.bucket_low,
                     bucket_high=market.bucket_high,
                     actual_high_f=market.actual_high_f,
+                    entry_time=entry_time_utc,
+                    series_ticker=market.series_ticker,
+                    use_historical_api=market.use_historical_api,
+                    market_close_time=market.close_time,
+                    city_name=market.city_name,
+                    strike_label=market.strike_label,
+                    title=market.title,
+                    subtitle=market.subtitle,
                 )
             )
             diagnostic = dict(candidate["diagnostic"])
@@ -759,6 +1033,28 @@ def run_historical_backtest(
 
     final_settlements = 0
     for position in open_positions:
+        if simulate_exits and position.entry_time is not None:
+            market_def = market_def_by_ticker.get(position.ticker)
+            if market_def is not None:
+                series = _load_or_fetch_candlestick_series(
+                    settings, cache, position, market_def, use_cache, refresh_cache,
+                )
+                exit_info = _simulate_exit_checkpoints(position, series, settings)
+                if exit_info is not None:
+                    exit_result = _exit_position(
+                        position,
+                        float(exit_info["exit_price"]),
+                        str(exit_info["exit_reason"]),
+                        exit_info["exit_time"],
+                        settings,
+                    )
+                    cash += float(exit_info["exit_price"]) * position.contracts - settings.fee_per_contract * position.contracts
+                    executed_trades.append(exit_result)
+                    final_settlements += 1
+                    settled_positions += 1
+                    early_exits += 1
+                    early_exit_reason_counts[str(exit_info["exit_reason"])] += 1
+                    continue
         settlement = _settle_position(position, settings)
         cash += float(settlement["payout"]) * position.contracts
         executed_trades.append(settlement)
@@ -819,5 +1115,8 @@ def run_historical_backtest(
             "cache_used": use_cache,
             "cache_refreshed": refresh_cache,
             "cache_dir": str(cache.base_dir) if use_cache else None,
+            "simulate_exits": simulate_exits,
+            "early_exits": early_exits,
+            "early_exit_reasons": dict(early_exit_reason_counts),
         }
     }

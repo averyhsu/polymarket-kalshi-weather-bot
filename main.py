@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import threading
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict
 
+from analytics.backtest_dashboard import launch_backtest_dashboard
 from analytics.backtest_reporting import build_backtest_result_package, render_backtest_terminal_report
 from config import load_settings
 from data.markets import earliest_reconstructable_market_date
@@ -39,8 +42,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backtest-no-cache", action="store_true", help="Ignore the local historical cache for this run")
     parser.add_argument("--backtest-refresh-cache", action="store_true", help="Refetch and overwrite the cached historical dataset")
     parser.add_argument("--backtest-raw", action="store_true", help="Print the full machine-readable backtest package as JSON")
+    parser.add_argument("--backtest-exits", action="store_true", help="Enable intraday exit simulation during backtests (stop-loss, profit-take, closeout)")
     parser.add_argument("--backtest-no-save", action="store_true", help="Do not save JSON and Markdown artifacts for this backtest run")
     parser.add_argument("--backtest-baseline", type=str, help="Optional JSON artifact path to compare the run against")
+    parser.add_argument("--dashboard", action="store_true", help="Launch the local dashboard for saved backtest artifacts")
+    parser.add_argument("--dashboard-artifact", type=str, help="Optional JSON artifact path to open in the local dashboard")
+    parser.add_argument("--dashboard-port", type=int, default=0, help="Optional port override for the local dashboard server")
+    parser.add_argument("--dashboard-no-open", action="store_true", help="Print the local dashboard URL without opening a browser")
     parser.add_argument("--positions", action="store_true", help="Show open positions")
     parser.add_argument("--close-all-paper", action="store_true", help="Close all open paper positions")
     return parser
@@ -113,6 +121,23 @@ def main() -> int:
         "verbose": args.verbose or None,
     }
     settings = load_settings(overrides)
+    if args.dashboard:
+        artifact_path = None if not args.dashboard_artifact else Path(args.dashboard_artifact)
+        results_dir = (settings.historical_data_dir / "results").resolve()
+        url = launch_backtest_dashboard(
+            results_dir=results_dir,
+            artifact_path=artifact_path,
+            port=args.dashboard_port,
+            open_browser=not args.dashboard_no_open,
+            blocking=False,
+        )
+        print(f"Backtest dashboard serving at {url}")
+        print("Press Ctrl+C to stop the dashboard server.")
+        try:
+            while True:
+                threading.Event().wait(3600)
+        except KeyboardInterrupt:
+            return 0
     _log_run_header(settings)
     orchestrator = WeatherTradingOrchestrator(settings)
 
@@ -144,6 +169,7 @@ def main() -> int:
                 entry_minute_utc=args.backtest_entry_minute_utc,
                 use_cache=not args.backtest_no_cache,
                 refresh_cache=args.backtest_refresh_cache,
+                simulate_exits=args.backtest_exits,
             ),
             settings,
             save_artifacts=not args.backtest_no_save,

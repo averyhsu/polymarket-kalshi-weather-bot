@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Backtest Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Local Analytics Dashboard</p>
+          <h1>Backtest Strategy Review</h1>
+          <p class="hero-copy">
+            Inspect one saved backtest artifact at a time. This dashboard is read-only and only uses
+            saved backtest JSON files from your local results directory.
+          </p>
+        </div>
+        <div class="artifact-picker">
+          <label for="artifactSelect">Artifact</label>
+          <select id="artifactSelect"></select>
+          <p id="artifactPath" class="muted"></p>
+        </div>
+      </header>
+
+      <main id="dashboardRoot" class="dashboard-root">
+        <section class="status-card">
+          <p>Loading dashboard data...</p>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+  </html>

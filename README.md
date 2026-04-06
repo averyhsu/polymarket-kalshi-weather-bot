@@ -221,6 +221,8 @@ python main.py --backtest --backtest-days 30 --backtest-refresh-cache
 python main.py --backtest --backtest-days 30 --backtest-raw
 python main.py --backtest --backtest-days 30 --backtest-no-save
 python main.py --backtest --backtest-days 30 --backtest-baseline historical_data/backtests/results/<baseline>.json
+python main.py --dashboard
+python main.py --dashboard --dashboard-artifact historical_data/backtests/results/<artifact>.json
 ```
 
 What the backtest does:
@@ -258,6 +260,37 @@ Useful flags:
 - `--backtest-max-range` uses the earliest fully reconstructable historical date through yesterday
 
 This makes it easier to compare model iterations over time:
+
+- run a backtest and let it save the JSON/Markdown artifacts
+- launch `python main.py --dashboard`
+- the local dashboard opens the most recent saved JSON artifact from `historical_data/backtests/results`
+- use `--dashboard-artifact` when you want to inspect a specific saved run instead of the newest one
+
+## Local Backtest Dashboard
+
+The repo now includes a local read-only analytics dashboard for saved backtest artifacts. This dashboard is backtest-only; it does not read from live trading, demo trading, or SQLite order history.
+
+Launch it with:
+
+```bash
+python main.py --dashboard
+python main.py --dashboard --dashboard-artifact historical_data/backtests/results/<artifact>.json
+python main.py --dashboard --dashboard-no-open
+```
+
+What it shows:
+
+- headline performance metrics
+- daily equity curve and realized daily P&L
+- by-city and by-side performance
+- EV-bin and price-bin performance
+- top winners and top losers
+- skip reasons
+- city/date concentration
+- selected vs approved-not-selected candidates
+- full searchable trade ledger
+
+The dashboard serves a local webpage and reads only saved JSON artifacts from `historical_data/backtests/results`. It does not modify the artifact and does not change live/demo deployment behavior.
 
 - use the terminal summary for quick evaluation
 - open the saved Markdown report for a readable archive of the run

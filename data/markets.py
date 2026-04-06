@@ -651,6 +651,61 @@ def fetch_historical_market_definitions(
     return sorted(all_markets.values(), key=lambda item: (item.target_date, item.city_key, item.ticker))
 
 
+# ---------------------------------------------------------------------------
+# Candlestick series (full hold-period price data for exit simulation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CandlestickPoint:
+    """Single hourly candlestick data point."""
+
+    timestamp: datetime
+    yes_bid: float
+    yes_ask: float
+    no_bid: float
+    no_ask: float
+    last_price: float
+    volume: float
+    open_interest: float
+
+
+def serialize_candlestick_series(points: List[CandlestickPoint]) -> List[Dict[str, Any]]:
+    """Serialize a candlestick series to JSON-safe dicts."""
+
+    return [
+        {
+            "timestamp": point.timestamp.isoformat(),
+            "yes_bid": point.yes_bid,
+            "yes_ask": point.yes_ask,
+            "no_bid": point.no_bid,
+            "no_ask": point.no_ask,
+            "last_price": point.last_price,
+            "volume": point.volume,
+            "open_interest": point.open_interest,
+        }
+        for point in points
+    ]
+
+
+def deserialize_candlestick_series(raw: List[Dict[str, Any]]) -> List[CandlestickPoint]:
+    """Deserialize a candlestick series from JSON dicts."""
+
+    return [
+        CandlestickPoint(
+            timestamp=datetime.fromisoformat(item["timestamp"]),
+            yes_bid=float(item["yes_bid"]),
+            yes_ask=float(item["yes_ask"]),
+            no_bid=float(item["no_bid"]),
+            no_ask=float(item["no_ask"]),
+            last_price=float(item["last_price"]),
+            volume=float(item["volume"]),
+            open_interest=float(item["open_interest"]),
+        )
+        for item in raw
+    ]
+
+
 def _candlestick_close(item: Dict[str, Any], key: str) -> float:
     values = item.get(key)
     if not isinstance(values, dict):
@@ -723,3 +778,72 @@ def fetch_historical_market_quote(
         updated_time=datetime.fromtimestamp(int(latest.get("end_period_ts") or end_ts), tz=timezone.utc),
         status="settled",
     )
+
+
+def _raw_candle_to_point(item: Dict[str, Any]) -> Optional[CandlestickPoint]:
+    """Convert a raw Kalshi candlestick dict to a CandlestickPoint."""
+
+    end_ts = item.get("end_period_ts")
+    if not end_ts:
+        return None
+    yes_bid = _candlestick_close(item, "yes_bid")
+    yes_ask = _candlestick_close(item, "yes_ask")
+    last_price = _candlestick_close(item, "price")
+    if yes_bid <= 0.0 and yes_ask <= 0.0 and last_price <= 0.0:
+        return None
+    no_bid = max(0.0, min(1.0, 1.0 - yes_ask)) if yes_ask > 0.0 else max(0.0, 1.0 - last_price)
+    no_ask = max(0.0, min(1.0, 1.0 - yes_bid)) if yes_bid > 0.0 else max(0.0, 1.0 - last_price)
+    return CandlestickPoint(
+        timestamp=datetime.fromtimestamp(int(end_ts), tz=timezone.utc),
+        yes_bid=yes_bid,
+        yes_ask=yes_ask if yes_ask > 0.0 else max(yes_bid, last_price),
+        no_bid=no_bid,
+        no_ask=no_ask,
+        last_price=last_price if last_price > 0.0 else max(yes_bid, yes_ask, 0.5),
+        volume=float(item.get("volume_fp") or 0.0),
+        open_interest=float(item.get("open_interest_fp") or 0.0),
+    )
+
+
+def fetch_historical_candlestick_series(
+    settings: Settings,
+    market: HistoricalMarketDefinition,
+    *,
+    start_time_utc: datetime,
+    end_time_utc: datetime,
+    period_interval_minutes: int = 60,
+) -> List[CandlestickPoint]:
+    """Fetch all hourly candlesticks for a market between two timestamps."""
+
+    if start_time_utc.tzinfo is None:
+        start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
+    else:
+        start_time_utc = start_time_utc.astimezone(timezone.utc)
+    if end_time_utc.tzinfo is None:
+        end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
+    else:
+        end_time_utc = end_time_utc.astimezone(timezone.utc)
+
+    client = KalshiClient(settings)
+    start_ts = int(start_time_utc.timestamp())
+    end_ts = int(end_time_utc.timestamp())
+    try:
+        payload = client.get_market_candlesticks(
+            series_ticker=market.series_ticker,
+            ticker=market.ticker,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            period_interval=period_interval_minutes,
+            historical=market.use_historical_api,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Kalshi candlestick series request failed for %s: %s", market.ticker, exc)
+        return []
+
+    points: List[CandlestickPoint] = []
+    for raw_candle in payload.get("candlesticks", []):
+        point = _raw_candle_to_point(raw_candle)
+        if point is not None:
+            points.append(point)
+    points.sort(key=lambda p: p.timestamp)
+    return points

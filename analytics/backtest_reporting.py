@@ -66,7 +66,8 @@ def render_backtest_terminal_report(package: Dict[str, Any]) -> str:
         f"Range: {summary['start_date']} to {summary['end_date']} | Entry: {summary['entry_time_utc']} UTC | "
         f"Profile: {run['profile']} | Sides: {'NO-only' if run['no_only'] else 'YES+NO'}",
         f"Cache: {'reused' if summary['cache_used'] else 'off'}"
-        + (" (refreshed)" if summary["cache_refreshed"] else ""),
+        + (" (refreshed)" if summary["cache_refreshed"] else "")
+        + (f" | Exits: {'on' if summary.get('simulate_exits') else 'off'}"),
         "",
         "Performance",
         f"- Starting balance: {_fmt_currency(summary['starting_balance'])}",
@@ -112,6 +113,12 @@ def render_backtest_terminal_report(package: Dict[str, Any]) -> str:
     lines.extend(_render_trade_lines(diagnostics["top_winners"], fallback="No winning trades"))
     lines.extend(["", "Top Losers"])
     lines.extend(_render_trade_lines(diagnostics["top_losers"], fallback="No losing trades"))
+    exit_reasons = diagnostics.get("exit_reasons", [])
+    if exit_reasons:
+        lines.extend(["", "Exit Simulation"])
+        lines.append(f"- Early exits: {summary.get('early_exits', 0)}")
+        for item in exit_reasons:
+            lines.append(f"- {item['reason']}: {item['count']}")
     lines.extend(["", "Skip Reasons"])
     lines.extend(_render_skip_lines(diagnostics["skip_reasons"]))
     lines.extend(["", "Artifacts"])
@@ -237,6 +244,22 @@ def render_backtest_markdown_report(package: Dict[str, Any]) -> str:
         ]
     )
     lines.extend(_render_trade_table(diagnostics["top_losers"]))
+    exit_reasons = diagnostics.get("exit_reasons", [])
+    if exit_reasons:
+        lines.extend(
+            [
+                "",
+                "## Exit Simulation",
+                "",
+                f"- Exit simulation: {'enabled' if summary.get('simulate_exits') else 'disabled'}",
+                f"- Early exits: {summary.get('early_exits', 0)}",
+                "",
+                "| Reason | Count |",
+                "| --- | ---: |",
+            ]
+        )
+        for item in exit_reasons:
+            lines.append(f"| {item['reason']} | {item['count']} |")
     lines.extend(
         [
             "",
@@ -386,6 +409,8 @@ def _build_summary(backtest: Dict[str, Any]) -> Dict[str, Any]:
         "brier_score": None if backtest["brier_score"] is None else float(backtest["brier_score"]),
         "cache_used": bool(backtest["cache_used"]),
         "cache_refreshed": bool(backtest["cache_refreshed"]),
+        "simulate_exits": bool(backtest.get("simulate_exits", False)),
+        "early_exits": int(backtest.get("early_exits", 0)),
     }
 
 
@@ -405,6 +430,7 @@ def _build_diagnostics(backtest: Dict[str, Any]) -> Dict[str, Any]:
         "ev_bins": _bin_trade_performance(trades, key="expected_value"),
         "price_bins": _bin_trade_performance(trades, key="entry_price"),
         "city_date_concentration": _city_date_concentration(trades),
+        "exit_reasons": _summarize_exit_reasons(trades),
     }
 
 
@@ -549,6 +575,17 @@ def _city_date_concentration(trades: List[Dict[str, Any]]) -> List[Dict[str, Any
         grouped[label]["trades"] += 1
         grouped[label]["realized_pnl"] += float(trade["realized_pnl"])
     return sorted(grouped.values(), key=lambda item: (item["trades"], abs(item["realized_pnl"])), reverse=True)[:8]
+
+
+def _summarize_exit_reasons(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    for trade in trades:
+        if trade.get("exited_early"):
+            counts[str(trade.get("exit_reason", "unknown"))] += 1
+    return [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))
+    ]
 
 
 def _summarize_skip_reasons(skipped: List[str]) -> List[Dict[str, Any]]:
